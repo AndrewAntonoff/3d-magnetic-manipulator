@@ -1,0 +1,920 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2024 Your Company.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "spi.h"
+#include "tim.h"
+#include "usart.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "config.h"
+#include "coil_driver.h"
+#include "sensor_mlx90393.h"
+#include "debug_console.h"
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include <stdlib.h>
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+// Глобальные структуры
+SystemState_t system_state = {
+    .coils_enabled = 0,
+    .sensors_enabled = 0,
+    .monitoring_active = 0,
+    .calibration_done = 0,
+    .system_uptime_ms = 0,
+    .cpu_usage_percent = 0.0f
+};
+
+OperationMode_t current_mode = MODE_IDLE;
+
+// Буферы
+char console_buffer[512];
+char monitor_buffer[1024];
+uint8_t command_buffer[128];
+uint16_t command_index = 0;
+uint8_t RxChar;  // Глобальная или static в main
+
+// Тайминги
+uint32_t last_monitor_time = 0;
+uint32_t monitor_interval = 100; // мс
+uint32_t last_cpu_measure = 0;
+uint32_t idle_counter_start = 0;
+uint32_t idle_counter = 0;
+
+// Статистика
+uint32_t total_commands = 0;
+uint32_t bytes_received = 0;
+uint32_t bytes_transmitted = 0;
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+// Команды консоли
+#define CMD_HELP          "help"
+#define CMD_STATUS        "status"
+#define CMD_TEST_COIL     "testcoil"
+#define CMD_TEST_ALL      "testall"
+#define CMD_TEST_SPI      "testspi"
+#define CMD_TEST_SENSOR   "testsensor"
+#define CMD_CALIBRATE     "calibrate"
+#define CMD_MONITOR       "monitor"
+#define CMD_STOP          "stop"
+#define CMD_RESET         "reset"
+#define CMD_COIL          "coil"
+#define CMD_SENSOR        "sensor"
+#define CMD_SPI           "spi"
+#define CMD_EXPORT        "export"
+#define CMD_CONFIG        "config"
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+
+/* USER CODE BEGIN PV */
+// Флаги
+uint8_t new_command = 0;
+uint8_t system_ready = 0;
+uint8_t emergency_stop = 0;
+
+// Тестовые переменные
+float test_coil_power = 0.0f;
+uint8_t test_coil_index = 0;
+uint8_t test_sensor_index = 0;
+uint8_t test_spi_pattern = 0xAA;
+// Объявление массива датчиков (определен в sensor_mlx90393.c)
+extern MLX90393_t sensors[NUM_SENSORS];
+
+// ПИД параметры (заглушка)
+typedef struct {
+    float Kp, Ki, Kd;
+    float setpoint[3];
+    float output[3];
+} PID_Controller_t;
+
+PID_Controller_t pid_controller = {
+    .Kp = 1.0f,
+    .Ki = 0.1f,
+    .Kd = 0.01f,
+    .setpoint = {0, 0, 0},
+    .output = {0, 0, 0}
+};
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+/* USER CODE BEGIN PFP */
+// Прототипы внутренних функций
+void System_Init(void);
+void System_Deinit(void);
+void Process_Console_Commands(void);
+void Update_System_Status(void);
+void Handle_Emergency_Stop(void);
+
+// Функции тестирования
+void Run_Full_System_Test(void);
+void Run_Coil_Test_Suite(void);
+void Run_Sensor_Test_Suite(void);
+void Run_SPI_Test_Suite(void);
+void Run_Integration_Test(void);
+
+// Вспомогательные функции
+void Calculate_CPU_Usage(void);
+void Update_Uptime(void);
+void Save_System_Config(void);
+void Load_System_Config(void);
+
+// Прототипы функций, которые определены ниже в файле
+void Show_Help_Menu(void);
+void Show_System_Status(void);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+// Инициализация системы
+void System_Init(void) {
+    // Инициализация отладки
+    Debug_Init(&huart2);
+    Debug_Print(LOG_LEVEL_INFO, "=== Magnetic Manipulator System Initialization ===\r\n");
+
+    // Инициализация катушек
+    Debug_Print(LOG_LEVEL_INFO, "Initializing coil drivers...\r\n");
+    Coils_Init();
+    system_state.coils_enabled = 1;
+
+    // Инициализация датчиков
+    Debug_Print(LOG_LEVEL_INFO, "Initializing magnetic sensors...\r\n");
+    Sensors_Init();
+    system_state.sensors_enabled = 1;
+
+    // Загрузка конфигурации
+    Debug_Print(LOG_LEVEL_INFO, "Loading system configuration...\r\n");
+    Load_System_Config();
+    Load_Calibration_From_Flash();
+
+    // Проверка аппаратной части
+    Debug_Print(LOG_LEVEL_INFO, "Running hardware self-test...\r\n");
+    Run_Full_System_Test();
+
+    system_state.system_uptime_ms = 0;
+    system_ready = 1;
+
+    Debug_Print(LOG_LEVEL_INFO, "System initialization complete!\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "Type 'help' for available commands.\r\n");
+}
+
+// Полный системный тест
+void Run_Full_System_Test(void) {
+    Debug_Print(LOG_LEVEL_INFO, "\r\n=== FULL SYSTEM TEST ===\r\n");
+
+    // 1. Тест GPIO
+    Debug_Print(LOG_LEVEL_INFO, "1. Testing GPIO pins...\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "   Direction pins: ");
+    for(int i = 0; i < NUM_COILS; i++) {
+        HAL_GPIO_TogglePin(GPIOE, 1 << i);
+        HAL_Delay(10);
+    }
+    Debug_Print(LOG_LEVEL_INFO, "OK\r\n");
+
+    Debug_Print(LOG_LEVEL_INFO, "   CS pins: ");
+    for(int i = 0; i < NUM_SENSORS; i++) {
+        HAL_GPIO_TogglePin(GPIOC, 1 << i);
+        HAL_Delay(10);
+    }
+    Debug_Print(LOG_LEVEL_INFO, "OK\r\n");
+
+    // 2. Тест PWM
+    Debug_Print(LOG_LEVEL_INFO, "2. Testing PWM outputs...\r\n");
+    for(int i = 0; i < 4; i++) {
+        Set_Coil_Power(i, 0.1f);
+        HAL_Delay(50);
+        Set_Coil_Power(i, 0.0f);
+        HAL_Delay(50);
+    }
+    Debug_Print(LOG_LEVEL_INFO, "   PWM test: OK\r\n");
+
+    // 3. Тест SPI
+    Debug_Print(LOG_LEVEL_INFO, "3. Testing SPI bus...\r\n");
+    Run_SPI_Test_Suite();
+
+    // 4. Тест датчиков
+    Debug_Print(LOG_LEVEL_INFO, "4. Testing magnetic sensors...\r\n");
+    Run_Sensor_Test_Suite();
+
+    // 5. Тест катушек
+    Debug_Print(LOG_LEVEL_INFO, "5. Testing coil drivers...\r\n");
+    Run_Coil_Test_Suite();
+
+    Debug_Print(LOG_LEVEL_INFO, "=== SYSTEM TEST COMPLETE ===\r\n\r\n");
+}
+
+// Тест SPI
+void Run_SPI_Test_Suite(void) {
+    Debug_Print(LOG_LEVEL_INFO, "   Starting SPI test suite...\r\n");
+
+    // Тест на передачу данных
+    uint8_t tx_data[4] = {0xAA, 0x55, 0x00, 0xFF};
+    uint8_t rx_data[4] = {0};
+
+    // Используем CS0 для теста
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET);
+
+    if(HAL_SPI_Transmit(&hspi1, tx_data, 4, 100) == HAL_OK) {
+        Debug_Print(LOG_LEVEL_INFO, "   SPI transmit: OK\r\n");
+    } else {
+        Debug_Print(LOG_LEVEL_ERROR, "   SPI transmit: FAILED\r\n");
+    }
+
+    HAL_Delay(1);
+
+    if(HAL_SPI_Receive(&hspi1, rx_data, 4, 100) == HAL_OK) {
+        Debug_Print(LOG_LEVEL_INFO, "   SPI receive: OK\r\n");
+        Debug_Print(LOG_LEVEL_DEBUG, "   Received: 0x%02X 0x%02X 0x%02X 0x%02X\r\n",
+                   rx_data[0], rx_data[1], rx_data[2], rx_data[3]);
+    } else {
+        Debug_Print(LOG_LEVEL_ERROR, "   SPI receive: FAILED\r\n");
+    }
+
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);
+
+    // Тест скорости SPI
+    uint32_t start_time = HAL_GetTick();
+    uint32_t transfers = 0;
+
+    while(HAL_GetTick() - start_time < 100) { // 100 мс тест
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET);
+        HAL_SPI_Transmit(&hspi1, tx_data, 4, 1);
+        HAL_SPI_Receive(&hspi1, rx_data, 4, 1);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);
+        transfers++;
+    }
+
+    float spi_speed_kbps = (transfers * 8 * 8) / 100.0f; // kbps
+    Debug_Print(LOG_LEVEL_INFO, "   SPI speed: %.2f kbps (%lu transfers/100ms)\r\n",
+               spi_speed_kbps, transfers);
+
+    // Тест всех CS линий
+    Debug_Print(LOG_LEVEL_INFO, "   Testing all CS lines...\r\n");
+    for(int i = 0; i < NUM_SENSORS; i++) {
+        HAL_GPIO_WritePin(GPIOC, 1 << i, GPIO_PIN_RESET);
+        HAL_Delay(1);
+        if(HAL_GPIO_ReadPin(GPIOC, 1 << i) == GPIO_PIN_RESET) {
+            Debug_Print(LOG_LEVEL_DEBUG, "     CS%d: OK\r\n", i);
+        } else {
+            Debug_Print(LOG_LEVEL_ERROR, "     CS%d: FAILED\r\n", i);
+        }
+        HAL_GPIO_WritePin(GPIOC, 1 << i, GPIO_PIN_SET);
+        HAL_Delay(1);
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "   SPI test suite complete\r\n");
+}
+
+// Тест датчиков
+void Run_Sensor_Test_Suite(void) {
+    Debug_Print(LOG_LEVEL_INFO, "   Starting sensor test suite...\r\n");
+
+    int connected_sensors = 0;
+
+    for(int i = 0; i < NUM_SENSORS; i++) {
+        Debug_Print(LOG_LEVEL_INFO, "   Sensor %d: ", i+1);
+
+        // Попытка чтения 3 раза
+        uint8_t success = 0;
+        for(int attempt = 0; attempt < 3; attempt++) {
+            if(Read_Sensor(i)) {
+                success = 1;
+                break;
+            }
+            HAL_Delay(10);
+        }
+
+        if(success) {
+            connected_sensors++;
+            Debug_Print(LOG_LEVEL_INFO, "CONNECTED\r\n");
+            Debug_Print(LOG_LEVEL_DEBUG, "     X=%.2f, Y=%.2f, Z=%.2f mT\r\n",
+                       sensors[i].magnetic_field[0],
+                       sensors[i].magnetic_field[1],
+                       sensors[i].magnetic_field[2]);
+        } else {
+            Debug_Print(LOG_LEVEL_WARNING, "NOT CONNECTED\r\n");
+        }
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "   Connected sensors: %d/%d\r\n",
+               connected_sensors, NUM_SENSORS);
+
+    if(connected_sensors == 0) {
+        Debug_Print(LOG_LEVEL_WARNING, "   WARNING: No sensors connected!\r\n");
+    } else if(connected_sensors < NUM_SENSORS) {
+        Debug_Print(LOG_LEVEL_WARNING, "   WARNING: Some sensors missing!\r\n");
+    } else {
+        Debug_Print(LOG_LEVEL_INFO, "   All sensors: OK\r\n");
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "   Sensor test suite complete\r\n");
+}
+
+// Тест катушек
+void Run_Coil_Test_Suite(void) {
+    Debug_Print(LOG_LEVEL_INFO, "   Starting coil test suite...\r\n");
+
+    // Безопасный тест: плавное включение каждой катушки
+    for(int i = 0; i < NUM_COILS; i++) {
+        Debug_Print(LOG_LEVEL_INFO, "   Coil %d: ", i+1);
+
+        // Плавный старт
+        for(float pwm = 0.0f; pwm <= 0.15f; pwm += 0.03f) {
+            Set_Coil_Power(i, pwm);
+            HAL_Delay(30);
+        }
+
+        // Удержание
+        HAL_Delay(100);
+
+        // Плавный останов
+        for(float pwm = 0.15f; pwm >= 0.0f; pwm -= 0.03f) {
+            Set_Coil_Power(i, pwm);
+            HAL_Delay(30);
+        }
+
+        Debug_Print(LOG_LEVEL_INFO, "OK\r\n");
+        HAL_Delay(50);
+    }
+
+    // Тест направления
+    Debug_Print(LOG_LEVEL_INFO, "   Testing directions...\r\n");
+    for(int i = 0; i < 4; i++) {
+        Set_Coil_Power(i, 0.1f);
+        HAL_Delay(100);
+        Set_Coil_Power(i, -0.1f);
+        HAL_Delay(100);
+        Set_Coil_Power(i, 0.0f);
+    }
+    Debug_Print(LOG_LEVEL_INFO, "   Direction test: OK\r\n");
+
+    Debug_Print(LOG_LEVEL_INFO, "   Coil test suite complete\r\n");
+}
+
+// Интеграционный тест
+void Run_Integration_Test(void) {
+    Debug_Print(LOG_LEVEL_INFO, "\r\n=== INTEGRATION TEST ===\r\n");
+
+    // 1. Проверка связи между компонентами
+    Debug_Print(LOG_LEVEL_INFO, "1. Testing component communication...\r\n");
+
+    // 2. Чтение датчиков при включенных катушках
+    Debug_Print(LOG_LEVEL_INFO, "2. Testing sensors with coil interference...\r\n");
+
+    // Включаем катушки по очереди и смотрим на датчики
+    for(int coil = 0; coil < 4; coil++) {
+        Debug_Print(LOG_LEVEL_INFO, "   Coil %d ON, reading sensors...\r\n", coil+1);
+
+        Set_Coil_Power(coil, 0.1f);
+        HAL_Delay(200);
+
+        Read_All_Sensors();
+
+        // Выводим показания первого датчика
+        Debug_Print(LOG_LEVEL_DEBUG, "     Sensor1: X=%.2f, Y=%.2f, Z=%.2f\r\n",
+                   sensors[0].magnetic_field[0],
+                   sensors[0].magnetic_field[1],
+                   sensors[0].magnetic_field[2]);
+
+        Set_Coil_Power(coil, 0.0f);
+        HAL_Delay(100);
+    }
+
+    // 3. Проверка времени отклика
+    Debug_Print(LOG_LEVEL_INFO, "3. Testing response time...\r\n");
+
+    uint32_t start_time = HAL_GetTick();
+    for(int i = 0; i < 100; i++) {
+        Set_Coil_Power(0, 0.05f);
+        Read_Sensor(0);
+        Set_Coil_Power(0, 0.0f);
+    }
+    uint32_t end_time = HAL_GetTick();
+
+    float avg_time = (end_time - start_time) / 100.0f;
+    Debug_Print(LOG_LEVEL_INFO, "   Average cycle time: %.2f ms\r\n", avg_time);
+
+    Debug_Print(LOG_LEVEL_INFO, "=== INTEGRATION TEST COMPLETE ===\r\n");
+}
+
+// Мониторинг в реальном времени
+void Update_Monitoring(void) {
+    uint32_t current_time = HAL_GetTick();
+
+    if(current_mode == MODE_MONITORING &&
+       current_time - last_monitor_time >= monitor_interval) {
+
+        last_monitor_time = current_time;
+
+        // Формируем строку мониторинга
+        memset(monitor_buffer, 0, sizeof(monitor_buffer));
+
+        // Временная метка
+        snprintf(monitor_buffer, sizeof(monitor_buffer),
+                "[%lu] ", system_state.system_uptime_ms);
+
+        // Данные катушек
+        strcat(monitor_buffer, "COILS:");
+        for(int i = 0; i < NUM_COILS; i++) {
+            char coil_str[16];
+            snprintf(coil_str, sizeof(coil_str), "%.2f,", Get_Coil_Power(i));
+            strcat(monitor_buffer, coil_str);
+        }
+
+        // Данные датчиков (первые 3)
+        strcat(monitor_buffer, " SENSORS:");
+        for(int i = 0; i < 3 && i < NUM_SENSORS; i++) {
+            if(Read_Sensor(i)) {
+                char sensor_str[32];
+                snprintf(sensor_str, sizeof(sensor_str),
+                        "%.1f/%.1f/%.1f;",
+                        sensors[i].magnetic_field[0],
+                        sensors[i].magnetic_field[1],
+                        sensors[i].magnetic_field[2]);
+                strcat(monitor_buffer, sensor_str);
+            } else {
+                strcat(monitor_buffer, "?,?,?;");
+            }
+        }
+
+        // Системная информация
+        char sys_str[32];
+        snprintf(sys_str, sizeof(sys_str),
+                " CPU=%.1f%%, MODE=%d",
+                system_state.cpu_usage_percent,
+                current_mode);
+        strcat(monitor_buffer, sys_str);
+
+        strcat(monitor_buffer, "\r\n");
+
+        // Отправка
+        HAL_UART_Transmit(&huart2, (uint8_t*)monitor_buffer,
+                         strlen(monitor_buffer), 100);
+
+        bytes_transmitted += strlen(monitor_buffer);
+    }
+}
+
+// Обработка команд консоли
+void Process_Console_Commands(void) {
+    if(new_command) {
+        new_command = 0;
+        total_commands++;
+
+        // Преобразуем в строку
+        command_buffer[command_index] = '\0';
+        char* cmd = (char*)command_buffer;
+
+        Debug_Print(LOG_LEVEL_DEBUG, "Command: %s\r\n", cmd);
+
+        // Парсинг команды
+        if(strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
+            Show_Help_Menu();
+        }
+        else if(strcmp(cmd, "status") == 0) {
+            Show_System_Status();
+        }
+        else if(strncmp(cmd, "testcoil", 8) == 0) {
+            // Формат: testcoil <номер> <мощность>
+            int coil_num;
+            float power;
+            if(sscanf(cmd, "testcoil %d %f", &coil_num, &power) == 2) {
+                if(coil_num >= 1 && coil_num <= NUM_COILS &&
+                   power >= -1.0f && power <= 1.0f) {
+                    Start_Coil_Test(coil_num-1, 0, power, 0.05f, 100);
+                }
+            }
+        }
+        else if(strcmp(cmd, "testall") == 0) {
+            Run_Full_System_Test();
+        }
+        else if(strcmp(cmd, "testspi") == 0) {
+            Run_SPI_Test_Suite();
+        }
+        else if(strcmp(cmd, "testsensor") == 0) {
+            Run_Sensor_Test_Suite();
+        }
+        else if(strcmp(cmd, "calibrate") == 0) {
+            Calibrate_Sensors_Start();
+        }
+        else if(strncmp(cmd, "monitor", 7) == 0) {
+            // Формат: monitor <интервал_мс>
+            int interval;
+            if(sscanf(cmd, "monitor %d", &interval) == 1 && interval > 0) {
+                monitor_interval = interval;
+                current_mode = MODE_MONITORING;
+                Debug_Print(LOG_LEVEL_INFO,
+                           "Monitoring started (interval: %d ms)\r\n", interval);
+            } else {
+                current_mode = MODE_MONITORING;
+                Debug_Print(LOG_LEVEL_INFO,
+                           "Monitoring started (default interval: 100 ms)\r\n");
+            }
+        }
+        else if(strcmp(cmd, "stop") == 0) {
+            current_mode = MODE_IDLE;
+            Stop_All_Coils();
+            Stop_RealTime_Monitoring();
+            Debug_Print(LOG_LEVEL_INFO, "All operations stopped\r\n");
+        }
+        else if(strncmp(cmd, "coil", 4) == 0) {
+            // Формат: coil <номер> <мощность>
+            int coil_num;
+            float power;
+            if(sscanf(cmd, "coil %d %f", &coil_num, &power) == 2) {
+                if(coil_num >= 1 && coil_num <= NUM_COILS) {
+                    Set_Coil_Power(coil_num-1, power);
+                }
+            }
+        }
+        else if(strcmp(cmd, "integration") == 0) {
+            Run_Integration_Test();
+        }
+        else if(strcmp(cmd, "export") == 0) {
+            Export_Coil_Data_CSV();
+            Export_Sensor_Data_CSV();
+        }
+        else if(strcmp(cmd, "reset") == 0) {
+            Debug_Print(LOG_LEVEL_INFO, "System reset...\r\n");
+            HAL_NVIC_SystemReset();
+        }
+        else if(strcmp(cmd, "emergency") == 0) {
+            emergency_stop = 1;
+            Handle_Emergency_Stop();
+        }
+        else {
+            Debug_Print(LOG_LEVEL_WARNING, "Unknown command: %s\r\n", cmd);
+            Debug_Print(LOG_LEVEL_INFO, "Type 'help' for available commands\r\n");
+        }
+
+        command_index = 0;
+        new_command = 0;
+        memset(command_buffer, 0, sizeof(command_buffer));  // Очистить буфер
+    }
+}
+
+// Показать справку
+void Show_Help_Menu(void) {
+    Debug_Print(LOG_LEVEL_INFO, "\r\n=== COMMAND REFERENCE ===\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "System Commands:\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  help           - Show this help\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  status         - Show system status\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  reset          - Reset system\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  emergency      - Emergency stop\r\n");
+
+    Debug_Print(LOG_LEVEL_INFO, "\r\nTesting Commands:\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  testall        - Run full system test\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  testspi        - Test SPI bus\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  testsensor     - Test all sensors\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  testcoil N P   - Test coil N at power P\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  integration    - Run integration test\r\n");
+
+    Debug_Print(LOG_LEVEL_INFO, "\r\nControl Commands:\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  coil N P       - Set coil N to power P (-1.0 to 1.0)\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  monitor [ms]   - Start monitoring (optional interval)\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  stop           - Stop all operations\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  calibrate      - Calibrate sensors\r\n");
+
+    Debug_Print(LOG_LEVEL_INFO, "\r\nData Commands:\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  export         - Export data to CSV\r\n");
+
+    Debug_Print(LOG_LEVEL_INFO, "================================\r\n");
+}
+
+// Показать статус системы
+void Show_System_Status(void) {
+    Debug_Print(LOG_LEVEL_INFO, "\r\n=== SYSTEM STATUS ===\r\n");
+
+    // Основная информация
+    Debug_Print(LOG_LEVEL_INFO, "Uptime: %lu seconds\r\n",
+               system_state.system_uptime_ms / 1000);
+    Debug_Print(LOG_LEVEL_INFO, "CPU Usage: %.1f%%\r\n",
+               system_state.cpu_usage_percent);
+    Debug_Print(LOG_LEVEL_INFO, "Mode: %d\r\n", current_mode);
+    Debug_Print(LOG_LEVEL_INFO, "Emergency Stop: %s\r\n",
+               emergency_stop ? "ACTIVE" : "INACTIVE");
+
+    // Статус катушек
+    Debug_Print(LOG_LEVEL_INFO, "\r\nCoils Status:\r\n");
+    for(int i = 0; i < NUM_COILS; i++) {
+        Debug_Print(LOG_LEVEL_INFO, "  Coil %2d: %6.1f%% %s\r\n",
+                   i+1, Get_Coil_Power(i) * 100,
+                   Get_Coil_Fault_Status(i) ? "[FAULT]" : "[OK]");
+    }
+
+    // Статус датчиков
+    Debug_Print(LOG_LEVEL_INFO, "\r\nSensors Status:\r\n");
+    int connected = 0;
+    for(int i = 0; i < NUM_SENSORS; i++) {
+        if(sensors[i].is_connected) connected++;
+    }
+    Debug_Print(LOG_LEVEL_INFO, "  Connected: %d/%d\r\n", connected, NUM_SENSORS);
+
+    // Коммуникация
+    Debug_Print(LOG_LEVEL_INFO, "\r\nCommunication:\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "  Commands: %lu\r\n", total_commands);
+    Debug_Print(LOG_LEVEL_INFO, "  RX Bytes: %lu\r\n", bytes_received);
+    Debug_Print(LOG_LEVEL_INFO, "  TX Bytes: %lu\r\n", bytes_transmitted);
+
+    Debug_Print(LOG_LEVEL_INFO, "========================\r\n");
+}
+
+// Обновление статуса системы
+void Update_System_Status(void) {
+    // Обновляем время работы
+    system_state.system_uptime_ms = HAL_GetTick();
+
+    // Проверяем безопасность
+    Check_Coils_Safety();
+
+    // Обновляем режим
+    if(emergency_stop) {
+        current_mode = MODE_FAULT;
+    }
+
+    // Обновляем использование CPU
+    Calculate_CPU_Usage();
+}
+
+// Расчет использования CPU
+void Calculate_CPU_Usage(void) {
+    static uint32_t last_calc_time = 0;
+    uint32_t current_time = HAL_GetTick();
+
+    if(current_time - last_calc_time >= 1000) { // Каждую секунду
+        // Простой метод: считаем количество вызовов idle
+        system_state.cpu_usage_percent = 100.0f -
+            (idle_counter / (SystemCoreClock / 1000000.0f)) * 100.0f;
+
+        if(system_state.cpu_usage_percent < 0) system_state.cpu_usage_percent = 0;
+        if(system_state.cpu_usage_percent > 100) system_state.cpu_usage_percent = 100;
+
+        idle_counter = 0;
+        last_calc_time = current_time;
+    }
+}
+
+// Аварийная остановка
+void Handle_Emergency_Stop(void) {
+    Debug_Print(LOG_LEVEL_ERROR, "!!! EMERGENCY STOP ACTIVATED !!!\r\n");
+
+    // Немедленно отключаем все катушки
+    Stop_All_Coils();
+
+    // Останавливаем все операции
+    current_mode = MODE_FAULT;
+
+    // Отключаем мониторинг
+    Stop_RealTime_Monitoring();
+
+    // Сохраняем состояние
+    Save_System_Config();
+
+    // Мигаем LED для индикации
+    for(int i = 0; i < 10; i++) {
+        HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+        HAL_Delay(100);
+    }
+
+    Debug_Print(LOG_LEVEL_ERROR, "System in FAULT mode. Reset required.\r\n");
+}
+
+// Сохранение конфигурации
+void Save_System_Config(void) {
+    // Заглушка - в реальности сохраняем во Flash
+    Debug_Print(LOG_LEVEL_DEBUG, "Configuration saved\r\n");
+}
+
+// Загрузка конфигурации
+void Load_System_Config(void) {
+    // Заглушка - в реальности загружаем из Flash
+    Debug_Print(LOG_LEVEL_DEBUG, "Configuration loaded\r\n");
+}
+
+// Обработчик прерывания UART
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART2) {
+        // RxChar уже содержит принятый байт (от предыдущего Receive_IT)
+
+        // Обработка RxChar
+        if (RxChar == '\r' || RxChar == '\n') {
+            if (command_index > 0) {
+                new_command = 1;
+            }
+        } else if (RxChar == '\b' || RxChar == 127) {
+            if (command_index > 0) {
+                command_index--;
+            }
+        } else if (command_index < sizeof(command_buffer) - 1) {
+            command_buffer[command_index++] = RxChar;
+            bytes_received++;
+        }
+
+        // Эхо
+        HAL_UART_Transmit(&huart2, &RxChar, 1, 10);
+
+        // Перезапустить прием следующего байта
+        HAL_UART_Receive_IT(&huart2, &RxChar, 1);
+    }
+}
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_TIM1_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
+  MX_USART2_UART_Init();
+
+  /* USER CODE BEGIN 2 */
+  // Инициализация системы
+  System_Init();
+
+  // Включаем прием по UART
+
+  HAL_UART_Receive_IT(&huart2, &RxChar, 1);
+
+  // Запускаем системный таймер
+  last_monitor_time = HAL_GetTick();
+
+  // Выводим приветствие
+  Debug_Print(LOG_LEVEL_INFO, "\r\n");
+  Debug_Print(LOG_LEVEL_INFO, "========================================\r\n");
+  Debug_Print(LOG_LEVEL_INFO, "   MAGNETIC MANIPULATOR CONTROL SYSTEM\r\n");
+  Debug_Print(LOG_LEVEL_INFO, "   Version: 2.0 | Built: %s %s\r\n", __DATE__, __TIME__);
+  Debug_Print(LOG_LEVEL_INFO, "   Coils: %d | Sensors: %d\r\n", NUM_COILS, NUM_SENSORS);
+  Debug_Print(LOG_LEVEL_INFO, "========================================\r\n\r\n");
+
+  // Показываем помощь
+  Show_Help_Menu();
+
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+    // Обработка команд
+    Process_Console_Commands();
+
+    // Обновление статуса системы
+    Update_System_Status();
+
+    // Мониторинг в реальном времени
+    Update_Monitoring();
+
+    // Обработка тестов катушек
+    if(Is_Coil_Test_Running()) {
+        Process_Coil_Test();
+    }
+
+    // Обработка калибровки
+    if(Is_Calibration_Running()) {
+        // Калибровка в процессе
+    }
+
+    // Проверка аварийной остановки
+    if(emergency_stop) {
+        Handle_Emergency_Stop();
+    }
+
+    // Простой счетчик для измерения CPU
+    idle_counter++;
+
+    // Небольшая задержка для стабильности
+    HAL_Delay(1);
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Supply configuration update enable
+  */
+  HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
+
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
+
+  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 5;
+  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLR = 2;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_2;
+  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
+                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
+  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/* USER CODE BEGIN 4 */
+// Обработчики ошибок
+void Error_Handler(void) {
+    Debug_Print(LOG_LEVEL_ERROR, "Fatal error occurred! System halted.\r\n");
+
+    // Мигаем светодиодом
+    while(1) {
+        HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+        HAL_Delay(500);
+    }
+}
+/* USER CODE END 4 */

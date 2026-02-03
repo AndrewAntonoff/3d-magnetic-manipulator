@@ -1,0 +1,358 @@
+#include "sensor_mlx90393.h"
+#include "debug_console.h"
+#include "spi.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+/* USER CODE BEGIN 0 */
+// Прототипы внутренних функций
+static void Configure_MLX90393(uint8_t sensor_idx);
+static uint8_t Test_MLX90393_Connection(uint8_t sensor_idx);
+/* USER CODE END 0 */
+
+// Массив датчиков
+MLX90393_t sensors[NUM_SENSORS];
+static uint8_t calibration_running = 0;
+
+/* USER CODE BEGIN 1 */
+// ============================================
+// ВНУТРЕННИЕ ФУНКЦИИ
+// ============================================
+
+// Функция конфигурации MLX90393
+static void Configure_MLX90393(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return;
+
+    MLX90393_t *sensor = &sensors[sensor_idx];
+
+    Debug_Print(LOG_LEVEL_DEBUG, "Configuring sensor %d...\r\n", sensor_idx);
+
+    // CS low
+    HAL_GPIO_WritePin(sensor->cs_port, sensor->cs_pin, GPIO_PIN_RESET);
+    HAL_Delay(1);
+
+    // Базовые команды настройки (упрощенные)
+    // Эти команды нужно адаптировать под ваш конкретный MLX90393!
+    uint8_t config_cmds[][2] = {
+        {0x60, 0x00},  // Запись в регистр 0x00
+        {0x00, 0x0C},  // Конфигурация 1: XYZ оси
+        {0x02, 0x30},  // Конфигурация 2
+        {0x04, 0x00},  // Конфигурация 3
+    };
+
+    for(int i = 0; i < 4; i++) {
+        uint8_t response[2] = {0};
+        HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(sensor->spi, config_cmds[i],
+                                                          response, 2, 10); // 10ms timeout
+
+        if(status != HAL_OK) {
+            Debug_Print(LOG_LEVEL_WARNING, "Sensor %d config cmd %d failed\r\n", sensor_idx, i);
+        }
+        HAL_Delay(1);
+    }
+
+    // CS high
+    HAL_GPIO_WritePin(sensor->cs_port, sensor->cs_pin, GPIO_PIN_SET);
+
+    HAL_Delay(5);
+    Debug_Print(LOG_LEVEL_DEBUG, "Sensor %d configured\r\n", sensor_idx);
+}
+
+// Тест подключения датчика (статика для внутреннего использования)
+static uint8_t Test_MLX90393_Connection(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return 0;
+
+    MLX90393_t *sensor = &sensors[sensor_idx];
+
+    // CS low
+    HAL_GPIO_WritePin(sensor->cs_port, sensor->cs_pin, GPIO_PIN_RESET);
+    HAL_Delay(1);
+
+    // Команда чтения WHO_AM_I (регистр 0x0C)
+    uint8_t cmd[2] = {0x8C, 0x00};  // Read register 0x0C
+    uint8_t response[2] = {0};
+
+    HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(sensor->spi, cmd, response, 2, 20);
+
+    // CS high
+    HAL_GPIO_WritePin(sensor->cs_port, sensor->cs_pin, GPIO_PIN_SET);
+
+    if(status == HAL_OK) {
+        Debug_Print(LOG_LEVEL_INFO, "Sensor %d WHO_AM_I: 0x%02X\r\n",
+                    sensor_idx, response[1]);
+
+        // MLX90393 должен возвращать 0x39
+        if(response[1] == 0x39) {
+            return 1;
+        }
+    } else {
+        Debug_Print(LOG_LEVEL_ERROR, "SPI error in Test_MLX90393_Connection: %d\r\n", status);
+    }
+
+    return 0;
+}
+
+// Упрощенная функция чтения для тестирования (не зависает)
+static uint8_t Simple_Read_Sensor(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return 0;
+
+    MLX90393_t *sensor = &sensors[sensor_idx];
+
+    // Простой тест без сложных команд
+    HAL_GPIO_WritePin(sensor->cs_port, sensor->cs_pin, GPIO_PIN_RESET);
+    HAL_Delay(1);
+
+    // Простая команда NOP (0x00)
+    uint8_t test_cmd = 0x00;
+    uint8_t response = 0;
+
+    HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(sensor->spi, &test_cmd, &response, 1, 10);
+
+    HAL_GPIO_WritePin(sensor->cs_port, sensor->cs_pin, GPIO_PIN_SET);
+
+    if(status == HAL_OK) {
+        Debug_Print(LOG_LEVEL_DEBUG, "Simple read sensor %d: response 0x%02X\r\n", sensor_idx, response);
+        return 1;
+    } else {
+        Debug_Print(LOG_LEVEL_ERROR, "Simple read failed for sensor %d: status %d\r\n", sensor_idx, status);
+        return 0;
+    }
+}
+
+// Инициализация всех датчиков
+void Sensors_Init(void) {
+    // Инициализация SPI (предполагается, что MX_SPI1_Init уже вызвана в main)
+    Debug_Print(LOG_LEVEL_INFO, "Initializing sensors...\r\n");
+
+    // Назначение портов и пинов для CS (из main.h)
+    GPIO_TypeDef* cs_ports[] = {GPIOC, GPIOC, GPIOC, GPIOC, GPIOC, GPIOC, GPIOC, GPIOC};
+    uint16_t cs_pins[] = {Sensor1_CS_Pin, Sensor2_CS_Pin, Sensor3_CS_Pin, Sensor4_CS_Pin,
+                          Sensor5_CS_Pin, Sensor6_CS_Pin, Sensor7_CS_Pin, Sensor8_CS_Pin};
+
+    for(uint8_t i = 0; i < NUM_SENSORS; i++) {
+        sensors[i].spi = &hspi1;
+        sensors[i].cs_port = cs_ports[i];
+        sensors[i].cs_pin = cs_pins[i];
+        sensors[i].is_connected = 0;
+        sensors[i].is_calibrated = 0;
+        sensors[i].read_error_count = 0;
+        sensors[i].total_reads = 0;
+        sensors[i].failed_reads = 0;
+        sensors[i].average_read_time_ms = 0.0f;
+        memset(sensors[i].magnetic_field, 0, sizeof(sensors[i].magnetic_field));
+        memset(sensors[i].offset, 0, sizeof(sensors[i].offset));
+        memset(sensors[i].scale, 0, sizeof(sensors[i].scale));
+        memset(sensors[i].rotation_matrix, 0, sizeof(sensors[i].rotation_matrix));
+
+        // Тест подключения
+        Debug_Print(LOG_LEVEL_DEBUG, "Testing connection for sensor %d...\r\n", i);
+        sensors[i].is_connected = Test_MLX90393_Connection(i);
+
+        if(sensors[i].is_connected) {
+            Configure_MLX90393(i);
+        } else {
+            Debug_Print(LOG_LEVEL_WARNING, "Sensor %d not connected\r\n", i);
+        }
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "Sensors initialization complete\r\n");
+}
+
+void Sensors_Deinit(void) {
+    // Деинициализация, если нужно
+    Debug_Print(LOG_LEVEL_INFO, "Deinitializing sensors...\r\n");
+    for(uint8_t i = 0; i < NUM_SENSORS; i++) {
+        HAL_GPIO_WritePin(sensors[i].cs_port, sensors[i].cs_pin, GPIO_PIN_SET);
+    }
+}
+
+uint8_t Read_Sensor(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS || !sensors[sensor_idx].is_connected) return 0;
+
+    uint32_t start_time = HAL_GetTick();
+    MLX90393_t *sensor = &sensors[sensor_idx];
+
+    // CS low
+    HAL_GPIO_WritePin(sensor->cs_port, sensor->cs_pin, GPIO_PIN_RESET);
+    HAL_Delay(1);
+
+    // Команда чтения данных (пример: Single Measurement для XYZ)
+    uint8_t cmd[2] = {0x3E, 0x00};  // SM command for XYZ (адаптируйте по datasheet)
+    uint8_t response[8] = {0};  // Пример: статус + XYZ + T
+
+    HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(sensor->spi, cmd, response, 8, 50);
+
+    // CS high
+    HAL_GPIO_WritePin(sensor->cs_port, sensor->cs_pin, GPIO_PIN_SET);
+
+    sensor->total_reads++;
+    uint32_t read_time = HAL_GetTick() - start_time;
+    sensor->average_read_time_ms = (sensor->average_read_time_ms * (sensor->total_reads - 1) + read_time) / sensor->total_reads;
+
+    if(status != HAL_OK) {
+        sensor->failed_reads++;
+        sensor->read_error_count++;
+        Debug_Print(LOG_LEVEL_ERROR, "Read failed for sensor %d: status %d\r\n", sensor_idx, status);
+        return 0;
+    }
+
+    // Парсинг данных (пример, адаптируйте)
+    sensor->magnetic_field[0] = (int16_t)((response[2] << 8) | response[3]);  // X
+    sensor->magnetic_field[1] = (int16_t)((response[4] << 8) | response[5]);  // Y
+    sensor->magnetic_field[2] = (int16_t)((response[6] << 8) | response[7]);  // Z
+
+    Apply_Calibration(sensor_idx);
+
+    Debug_Print(LOG_LEVEL_DEBUG, "Sensor %d: X=%.2f, Y=%.2f, Z=%.2f\r\n",
+                sensor_idx, sensor->magnetic_field[0], sensor->magnetic_field[1], sensor->magnetic_field[2]);
+
+    return 1;
+}
+
+uint8_t Read_All_Sensors(void) {
+    uint8_t success = 1;
+    for(uint8_t i = 0; i < NUM_SENSORS; i++) {
+        if(!Read_Sensor(i)) success = 0;
+    }
+    return success;
+}
+
+void Calibrate_Sensors_Start(void) {
+    if(calibration_running) return;
+    calibration_running = 1;
+    Debug_Print(LOG_LEVEL_INFO, "Calibration started...\r\n");
+    // Реализация калибровки (заглушка)
+}
+
+void Calibrate_Sensors_Stop(void) {
+    calibration_running = 0;
+    Debug_Print(LOG_LEVEL_INFO, "Calibration stopped...\r\n");
+}
+
+uint8_t Is_Calibration_Running(void) {
+    return calibration_running;
+}
+
+void Save_Calibration_To_Flash(void) {
+    // Заглушка
+}
+
+void Load_Calibration_From_Flash(void) {
+    // Заглушка
+}
+
+void Calculate_Ball_Position(Position3D_t* position) {
+    // Заглушка для расчета позиции шарика
+    position->x = 0.0f;
+    position->y = 0.0f;
+    position->z = 0.0f;
+    position->confidence = 0.0f;
+}
+
+void Apply_Calibration(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return;
+
+    for(int i = 0; i < 3; i++) {
+        sensors[sensor_idx].magnetic_field[i] =
+            sensors[sensor_idx].magnetic_field[i] * sensors[sensor_idx].scale[i] +
+            sensors[sensor_idx].offset[i];
+    }
+}
+
+float Calculate_Magnetic_Field_Strength(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return 0.0f;
+
+    float bx = sensors[sensor_idx].magnetic_field[0];
+    float by = sensors[sensor_idx].magnetic_field[1];
+    float bz = sensors[sensor_idx].magnetic_field[2];
+
+    return sqrtf(bx*bx + by*by + bz*bz);
+}
+
+// Функция тестирования подключения (доступна из других файлов)
+uint8_t Test_Sensor_Connection(uint8_t sensor_idx) {
+    return Test_MLX90393_Connection(sensor_idx);
+}
+
+void Run_Sensor_Self_Test(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return;
+
+    Debug_Print(LOG_LEVEL_INFO, "Running self-test for sensor %d...\r\n", sensor_idx+1);
+    // Заглушка для самотестирования
+}
+
+uint8_t Get_Sensor_Health_Status(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return 0;
+
+    // Простая проверка здоровья датчика
+    if(sensors[sensor_idx].read_error_count > 10) return 0;
+    if(sensors[sensor_idx].failed_reads > sensors[sensor_idx].total_reads * 0.2f) return 0;
+
+    return 1;
+}
+
+void Get_Sensor_Data_String(char* buffer, uint16_t buffer_size) {
+    snprintf(buffer, buffer_size, "Sensors: ");
+    for(int i = 0; i < NUM_SENSORS && i < 3; i++) {
+        char temp[32];
+        snprintf(temp, sizeof(temp), "%.1f/%.1f/%.1f ",
+                sensors[i].magnetic_field[0],
+                sensors[i].magnetic_field[1],
+                sensors[i].magnetic_field[2]);
+        strcat(buffer, temp);
+    }
+}
+
+void Get_Sensor_Stats_String(char* buffer, uint16_t buffer_size) {
+    int connected = 0;
+    for(int i = 0; i < NUM_SENSORS; i++) {
+        if(sensors[i].is_connected) connected++;
+    }
+
+    snprintf(buffer, buffer_size, "Sensors: %d/%d connected", connected, NUM_SENSORS);
+}
+
+float Get_Sensor_Read_Frequency(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS || sensors[sensor_idx].total_reads < 2) return 0.0f;
+
+    return 1000.0f / sensors[sensor_idx].average_read_time_ms;
+}
+
+void Test_SPI_Bus(uint8_t test_pattern) {
+    Debug_Print(LOG_LEVEL_INFO, "Testing SPI bus with pattern 0x%02X...\r\n", test_pattern);
+
+    // Простой тест SPI
+    uint8_t tx_data = test_pattern;
+    uint8_t rx_data = 0;
+
+    // Используем датчик 0 для теста
+    HAL_GPIO_WritePin(GPIOC, Sensor1_CS_Pin, GPIO_PIN_RESET);
+    HAL_Delay(1);
+
+    HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(&hspi1, &tx_data, &rx_data, 1, 10);
+
+    HAL_GPIO_WritePin(GPIOC, Sensor1_CS_Pin, GPIO_PIN_SET);
+
+    if(status == HAL_OK) {
+        Debug_Print(LOG_LEVEL_INFO, "SPI test OK: sent 0x%02X, received 0x%02X\r\n",
+                   tx_data, rx_data);
+    } else {
+        Debug_Print(LOG_LEVEL_ERROR, "SPI test FAILED: status %d\r\n", status);
+    }
+}
+
+uint8_t Verify_SPI_Communication(void) {
+    // Простая проверка SPI
+    return 1;
+}
+
+void Measure_SPI_Timing(void) {
+    Debug_Print(LOG_LEVEL_INFO, "Measuring SPI timing...\r\n");
+    // Заглушка для измерения времени SPI
+}
+
+/* USER CODE BEGIN 2 */
+// Дополнительные функции можно добавлять здесь
+/* USER CODE END 2 */

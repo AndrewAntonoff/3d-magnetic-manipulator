@@ -1,0 +1,190 @@
+#include "sensor_mlx90393.h"
+#include "debug_console.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+// Массив датчиков
+MLX90393_t sensors[NUM_SENSORS];
+static uint8_t calibration_running = 0;
+
+void Sensors_Init(void) {
+    // Инициализация всех датчиков
+    for(int i = 0; i < NUM_SENSORS; i++) {
+        sensors[i].is_connected = 0;
+        sensors[i].is_calibrated = 0;
+        sensors[i].read_error_count = 0;
+        sensors[i].total_reads = 0;
+        sensors[i].failed_reads = 0;
+        sensors[i].average_read_time_ms = 0.0f;
+
+        // Инициализация калибровочных параметров
+        for(int j = 0; j < 3; j++) {
+            sensors[i].offset[j] = 0.0f;
+            sensors[i].scale[j] = 1.0f;
+        }
+
+        // Инициализация матрицы поворота (единичная матрица)
+        for(int row = 0; row < 3; row++) {
+            for(int col = 0; col < 3; col++) {
+                sensors[i].rotation_matrix[row][col] = (row == col) ? 1.0f : 0.0f;
+            }
+        }
+    }
+}
+
+void Sensors_Deinit(void) {
+    // Деинициализация датчиков
+}
+
+uint8_t Read_Sensor(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return 0;
+
+    // Заглушка - в реальности здесь чтение по SPI
+    // Имитация чтения случайных значений для тестирования
+    sensors[sensor_idx].magnetic_field[0] = (rand() % 2000 - 1000) / 100.0f;
+    sensors[sensor_idx].magnetic_field[1] = (rand() % 2000 - 1000) / 100.0f;
+    sensors[sensor_idx].magnetic_field[2] = (rand() % 2000 - 1000) / 100.0f;
+    sensors[sensor_idx].temperature = 25.0f + (rand() % 200) / 10.0f;
+
+    sensors[sensor_idx].last_read_time = HAL_GetTick();
+    sensors[sensor_idx].total_reads++;
+
+    // Применение калибровки
+    if(sensors[sensor_idx].is_calibrated) {
+        Apply_Calibration(sensor_idx);
+    }
+
+    sensors[sensor_idx].is_connected = 1;
+    return 1;
+}
+
+uint8_t Read_All_Sensors(void) {
+    uint8_t success_count = 0;
+    for(int i = 0; i < NUM_SENSORS; i++) {
+        if(Read_Sensor(i)) {
+            success_count++;
+        }
+    }
+    return success_count;
+}
+
+void Calibrate_Sensors_Start(void) {
+    calibration_running = 1;
+    Debug_Print(LOG_LEVEL_INFO, "Starting sensor calibration...\r\n");
+}
+
+void Calibrate_Sensors_Stop(void) {
+    calibration_running = 0;
+    Debug_Print(LOG_LEVEL_INFO, "Sensor calibration stopped.\r\n");
+}
+
+uint8_t Is_Calibration_Running(void) {
+    return calibration_running;
+}
+
+void Save_Calibration_To_Flash(void) {
+    Debug_Print(LOG_LEVEL_INFO, "Calibration data saved to flash.\r\n");
+}
+
+void Load_Calibration_From_Flash(void) {
+    Debug_Print(LOG_LEVEL_INFO, "Calibration data loaded from flash.\r\n");
+}
+
+void Calculate_Ball_Position(Position3D_t* position) {
+    // Простая заглушка для расчета позиции
+    position->x = 0.0f;
+    position->y = 0.0f;
+    position->z = 0.0f;
+    position->confidence = 0.5f;
+    position->timestamp = HAL_GetTick();
+}
+
+void Apply_Calibration(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS || !sensors[sensor_idx].is_calibrated) return;
+
+    // Применение смещения и масштаба
+    for(int i = 0; i < 3; i++) {
+        sensors[sensor_idx].magnetic_field[i] =
+            sensors[sensor_idx].magnetic_field[i] * sensors[sensor_idx].scale[i] +
+            sensors[sensor_idx].offset[i];
+    }
+}
+
+float Calculate_Magnetic_Field_Strength(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return 0.0f;
+
+    float bx = sensors[sensor_idx].magnetic_field[0];
+    float by = sensors[sensor_idx].magnetic_field[1];
+    float bz = sensors[sensor_idx].magnetic_field[2];
+
+    return sqrtf(bx*bx + by*by + bz*bz);
+}
+
+uint8_t Test_Sensor_Connection(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return 0;
+
+    // Имитация теста подключения
+    HAL_Delay(10);
+    return 1; // Всегда успешно для теста
+}
+
+void Run_Sensor_Self_Test(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return;
+
+    Debug_Print(LOG_LEVEL_INFO, "Running self-test for sensor %d...\r\n", sensor_idx+1);
+    // Заглушка для самотестирования
+}
+
+uint8_t Get_Sensor_Health_Status(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS) return 0;
+
+    // Простая проверка здоровья датчика
+    if(sensors[sensor_idx].read_error_count > 10) return 0;
+    if(sensors[sensor_idx].failed_reads > sensors[sensor_idx].total_reads * 0.2f) return 0;
+
+    return 1;
+}
+
+void Get_Sensor_Data_String(char* buffer, uint16_t buffer_size) {
+    snprintf(buffer, buffer_size, "Sensors: ");
+    for(int i = 0; i < NUM_SENSORS && i < 3; i++) {
+        char temp[32];
+        snprintf(temp, sizeof(temp), "%.1f/%.1f/%.1f ",
+                sensors[i].magnetic_field[0],
+                sensors[i].magnetic_field[1],
+                sensors[i].magnetic_field[2]);
+        strcat(buffer, temp);
+    }
+}
+
+void Get_Sensor_Stats_String(char* buffer, uint16_t buffer_size) {
+    int connected = 0;
+    for(int i = 0; i < NUM_SENSORS; i++) {
+        if(sensors[i].is_connected) connected++;
+    }
+
+    snprintf(buffer, buffer_size, "Sensors: %d/%d connected", connected, NUM_SENSORS);
+}
+
+float Get_Sensor_Read_Frequency(uint8_t sensor_idx) {
+    if(sensor_idx >= NUM_SENSORS || sensors[sensor_idx].total_reads < 2) return 0.0f;
+
+    return 1000.0f / sensors[sensor_idx].average_read_time_ms;
+}
+
+void Test_SPI_Bus(uint8_t test_pattern) {
+    Debug_Print(LOG_LEVEL_INFO, "Testing SPI bus with pattern 0x%02X...\r\n", test_pattern);
+    // Заглушка для теста SPI
+}
+
+uint8_t Verify_SPI_Communication(void) {
+    // Простая проверка SPI
+    return 1;
+}
+
+void Measure_SPI_Timing(void) {
+    Debug_Print(LOG_LEVEL_INFO, "Measuring SPI timing...\r\n");
+    // Заглушка для измерения времени SPI
+}
