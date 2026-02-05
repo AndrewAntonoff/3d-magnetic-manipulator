@@ -313,7 +313,7 @@ void Sensors_Init(void)
             default: sensors[i].cs_pin = GPIO_PIN_0;
         }
 
-        sensors[i].i2c_address = 0;
+        // УБИРАЕМ i2c_address - его нет в структуре
         memset(sensors[i].magnetic_field, 0, sizeof(sensors[i].magnetic_field));
         sensors[i].temperature      = 0.0f;
         sensors[i].is_connected     = 0;

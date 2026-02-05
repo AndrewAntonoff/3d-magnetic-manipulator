@@ -4,13 +4,21 @@
 #include "main.h"
 #include "config.h"
 
+// Геометрия датчиков (в мм)
+typedef struct {
+    float x, y, z;  // Позиция датчика относительно центра чаши
+    float orientation[3];  // Ориентация датчика (вектор нормали)
+} SensorGeometry_t;
+
 // Структура датчика MLX90393
 typedef struct {
     // Аппаратная конфигурация
     SPI_HandleTypeDef* spi;
     GPIO_TypeDef* cs_port;
     uint16_t cs_pin;
-    uint8_t i2c_address;  // Для совместимости
+
+    // Геометрия
+    SensorGeometry_t geometry;
 
     // Данные
     float magnetic_field[3];    // X, Y, Z в мТл
@@ -73,11 +81,21 @@ void Get_Sensor_Data_String(char* buffer, uint16_t buffer_size);
 void Get_Sensor_Stats_String(char* buffer, uint16_t buffer_size);
 float Get_Sensor_Read_Frequency(uint8_t sensor_idx);
 
-// Расширенная диагностика SPI
+// Геометрия
+void Initialize_Sensor_Geometry(void);
+const SensorGeometry_t* Get_Sensor_Geometry(uint8_t sensor_idx);
+
+// Магнитное поле
+void Calculate_Magnetic_Field_At_Point(float x, float y, float z, float* Bx, float* By, float* Bz);
+
+// SPI тестовые функции
 void Test_SPI_Bus(uint8_t test_pattern);
-uint8_t Verify_SPI_Communication(void);
 void Measure_SPI_Timing(void);
+uint8_t Verify_SPI_Communication(void);
+
+// Расширенная диагностика
 uint8_t MLX90393_Read_Register(uint8_t sensor_idx, uint8_t addr, uint16_t *value);
 void MLX90393_Reset_Sensor(uint8_t sensor_idx);
 uint8_t MLX90393_Get_Raw_Data(uint8_t sensor_idx, int16_t *t, int16_t *x, int16_t *y, int16_t *z);
+
 #endif /* __SENSOR_MLX90393_H */

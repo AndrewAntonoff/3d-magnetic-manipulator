@@ -1,0 +1,10 @@
+../Core/Src/levitation_control.c:26:6:Initialize_Coil_Geometry	3
+../Core/Src/levitation_control.c:78:6:Initialize_Sensor_Geometry	2
+../Core/Src/levitation_control.c:101:6:Calculate_Ball_Position	7
+../Core/Src/levitation_control.c:151:6:Update_PID_Controller	10
+../Core/Src/levitation_control.c:209:6:Calculate_Coil_Forces	8
+../Core/Src/levitation_control.c:252:6:Apply_Levitation_Control	4
+../Core/Src/levitation_control.c:287:6:Start_Levitation	3
+../Core/Src/levitation_control.c:312:6:Stop_Levitation	1
+../Core/Src/levitation_control.c:323:6:Set_Levitation_Target	1
+../Core/Src/levitation_control.c:331:6:Get_Levitation_Status	2

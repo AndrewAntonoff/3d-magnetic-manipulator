@@ -34,6 +34,8 @@
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include "levitation_control.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -118,21 +120,8 @@ extern MLX90393_t sensors[NUM_SENSORS];
 uint8_t streaming_active = 0;        // Флаг активной передачи
 uint32_t stream_interval_ms = 50;    // Интервал передачи (20 Гц)
 uint32_t last_stream_time = 0;       // Время последней передачи
+extern PID_Controller_t pid_controller;
 
-// ПИД параметры (заглушка)
-typedef struct {
-    float Kp, Ki, Kd;
-    float setpoint[3];
-    float output[3];
-} PID_Controller_t;
-
-PID_Controller_t pid_controller = {
-    .Kp = 1.0f,
-    .Ki = 0.1f,
-    .Kd = 0.01f,
-    .setpoint = {0, 0, 0},
-    .output = {0, 0, 0}
-};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -167,6 +156,11 @@ void Test_SPI_Pins(void);
 void Test_SPI_Communication(void);
 void Test_Single_Sensor(void);
 uint8_t Quick_Read_Sensor(uint8_t sensor_idx);
+void Start_Levitation(void);
+void Stop_Levitation(void);
+void Apply_Levitation_Control(void);
+void Test_All_Hardware(void);
+void Calibrate_Sensors_Offset(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -504,6 +498,12 @@ void Show_Help_Menu(void) {
     Debug_Print(LOG_LEVEL_INFO, "stop_stream - Stop data streaming\r\n");
     Debug_Print(LOG_LEVEL_INFO, "stream_fast - Fast streaming (100 Hz)\r\n");
     Debug_Print(LOG_LEVEL_INFO, "stream_slow - Slow streaming (10 Hz)\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "testall - Test all coils and sensors\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "calibrate_all - Calibrate all sensors\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "levitate - Start levitation\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "stop_levitate - Stop levitation\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "set_target <x> <y> <z> - Set target position\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "lev_status - Show levitation status\r\n");
 }
 
 void Show_System_Status(void) {
@@ -686,6 +686,82 @@ void Stream_Sensor_Data(void) {
         HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, 10);
     }
 }
+// Новые функции
+void Test_All_Hardware(void) {
+    Debug_Print(LOG_LEVEL_INFO, "=== COMPLETE HARDWARE TEST ===\r\n");
+
+    // Тест катушек
+    Debug_Print(LOG_LEVEL_INFO, "Testing all coils...\r\n");
+    for(int i = 0; i < NUM_COILS; i++) {
+        Debug_Print(LOG_LEVEL_INFO, "Coil %d: ", i);
+        Set_Coil_Power(i, 0.1f);
+        HAL_Delay(100);
+        Set_Coil_Power(i, -0.1f);
+        HAL_Delay(100);
+        Set_Coil_Power(i, 0.0f);
+        Debug_Print(LOG_LEVEL_INFO, "OK\r\n");
+        HAL_Delay(50);
+    }
+
+    // Тест датчиков
+    Debug_Print(LOG_LEVEL_INFO, "Testing all sensors...\r\n");
+    for(int i = 0; i < ACTIVE_SENSORS; i++) {
+        Debug_Print(LOG_LEVEL_INFO, "Sensor %d: ", i);
+        if(Quick_Read_Sensor(i)) {
+            Debug_Print(LOG_LEVEL_INFO, "OK - X=%.1f, Y=%.1f, Z=%.1f uT\r\n",
+                       sensors[i].magnetic_field[0],
+                       sensors[i].magnetic_field[1],
+                       sensors[i].magnetic_field[2]);
+        } else {
+            Debug_Print(LOG_LEVEL_INFO, "FAILED\r\n");
+        }
+        HAL_Delay(100);
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "Hardware test completed.\r\n");
+}
+
+void Calibrate_Sensors_Offset(void) {
+    Debug_Print(LOG_LEVEL_INFO, "=== CALIBRATING ALL SENSORS ===\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "Remove all magnets from the bowl...\r\n");
+    HAL_Delay(2000);
+
+    // Выключаем все катушки
+    Stop_All_Coils();
+
+    for(int i = 0; i < ACTIVE_SENSORS; i++) {
+        MLX90393_t *sensor = &sensors[i];
+
+        if(!sensor->is_connected) {
+            Debug_Print(LOG_LEVEL_WARNING, "Sensor %d not connected, skipping\r\n", i);
+            continue;
+        }
+
+        Debug_Print(LOG_LEVEL_INFO, "Calibrating sensor %d...\r\n", i);
+
+        float sum_x = 0, sum_y = 0, sum_z = 0;
+        int num_samples = 20;
+
+        for(int j = 0; j < num_samples; j++) {
+            if(Quick_Read_Sensor(i)) {
+                sum_x += sensor->magnetic_field[0];
+                sum_y += sensor->magnetic_field[1];
+                sum_z += sensor->magnetic_field[2];
+            }
+            HAL_Delay(50);
+        }
+
+        sensor->offset[0] = sum_x / num_samples;
+        sensor->offset[1] = sum_y / num_samples;
+        sensor->offset[2] = sum_z / num_samples;
+        sensor->is_calibrated = 1;
+
+        Debug_Print(LOG_LEVEL_INFO, "Sensor %d offset: X=%.1f, Y=%.1f, Z=%.1f uT\r\n",
+                   i, sensor->offset[0], sensor->offset[1], sensor->offset[2]);
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "Calibration complete.\r\n");
+}
 /* USER CODE END 0 */
 
 /**
@@ -757,6 +833,11 @@ int main(void)
     /* USER CODE BEGIN 3 */
 	  // Обработка команд
 	      Process_Console_Commands();
+
+	      // Если активен режим парения
+	          if(system_state.levitation_active) {
+	              Apply_Levitation_Control();
+	          }
 
 	      // Потоковая передача данных
 	      Stream_Sensor_Data();
@@ -894,6 +975,34 @@ void Process_Console_Commands(void) {
         if (strcmp(cmd, CMD_HELP) == 0) {
             Show_Help_Menu();
         }
+        else if (strcmp(cmd, "testall") == 0) {
+            Test_All_Hardware();
+        }
+        else if (strcmp(cmd, "levitate") == 0) {
+            Start_Levitation();
+        }
+        else if (strcmp(cmd, "stop_levitate") == 0) {
+            Stop_Levitation();
+        }
+        else if (strcmp(cmd, "set_target") == 0) {
+            char* args_start = (char*)command_buffer + strlen(cmd);
+            while(*args_start == ' ') args_start++;
+
+            float x, y, z;
+            if (sscanf(args_start, "%f %f %f", &x, &y, &z) == 3) {
+                Set_Levitation_Target(x, y, z);
+            } else {
+                Debug_Print(LOG_LEVEL_ERROR, "Usage: set_target <x> <y> <z>\r\n");
+            }
+        }
+        else if (strcmp(cmd, "lev_status") == 0) {
+            char status[256];
+            Get_Levitation_Status(status, sizeof(status));
+            Debug_Print(LOG_LEVEL_INFO, "%s", status);
+        }
+        else if (strcmp(cmd, "calibrate_all") == 0) {
+            Calibrate_Sensors_Offset();
+        }
         else if (strcmp(cmd, "start_stream") == 0) {
             char* args_start = (char*)command_buffer + strlen(cmd);
             while(*args_start == ' ') args_start++;
@@ -936,7 +1045,7 @@ void Process_Console_Commands(void) {
                        target_x, target_y, target_z);
 
             // Простой П-регулятор
-            float error_x, error_y, error_z;
+            float error_x;  // Удаляем error_y и error_z если они не используются
             float coil_power = 0.0f;
             float Kp = 0.001f;  // Коэффициент усиления
 
@@ -946,8 +1055,8 @@ void Process_Console_Commands(void) {
                 if (Fast_Read_Sensor(0, &x_comp, &y_comp, &z_comp)) {
                     // Вычисляем ошибку
                     error_x = target_x - x_comp;
-                    error_y = target_y - y_comp;
-                    error_z = target_z - z_comp;
+                    // error_y = target_y - y_comp;  // Удаляем если не используется
+                    // error_z = target_z - z_comp;  // Удаляем если не используется
 
                     // Простое управление одной катушкой по X
                     coil_power += Kp * error_x;
