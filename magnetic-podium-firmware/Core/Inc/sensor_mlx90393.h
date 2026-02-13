@@ -81,6 +81,6 @@ uint8_t Verify_SPI_Communication(void);
 // Расширенная диагностика
 uint8_t MLX90393_Read_Register(uint8_t sensor_idx, uint8_t addr, uint16_t *value);
 void MLX90393_Reset_Sensor(uint8_t sensor_idx);
-uint8_t MLX90393_Get_Raw_Data(uint8_t sensor_idx, int16_t *t, int16_t *x, int16_t *y, int16_t *z);
+uint8_t MLX90393_Get_Raw_Data(uint8_t sensor_idx, int16_t *x, int16_t *y, int16_t *z, uint16_t *t);
 
 #endif /* __SENSOR_MLX90393_H */
