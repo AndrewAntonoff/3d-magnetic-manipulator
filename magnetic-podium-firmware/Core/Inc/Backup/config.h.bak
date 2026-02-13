@@ -1,46 +1,55 @@
-#ifndef __CONFIG_H
-#define __CONFIG_H
+#ifndef CONFIG_H
+#define CONFIG_H
 
-// Конфигурация системы
-#define NUM_COILS         12
-#define NUM_SENSORS       8
-#define PWM_MAX_VALUE     999.0f
-#define PWM_FREQUENCY     1000  // Гц
+#include <stdint.h> // Убедитесь, что stdint.h включен
 
-// Лимиты безопасности
-#define MAX_COIL_CURRENT_MA   2000
-#define MAX_DUTY_CYCLE        0.8f
-#define MIN_DUTY_CYCLE        0.0f
-#define OVERCURRENT_THRESHOLD 2500  // мА
+// --- Определения для датчиков ---
+#define NUM_SENSORS 8  // Общее количество датчиков (даже если не все используются)
+#define ACTIVE_SENSORS 5 // Количество используемых датчиков
 
-// Конфигурация SPI
-#define SPI_TIMEOUT_MS    100
-#define SPI_SPEED_HZ      1000000  // 1 МГц
+// --- Определения для катушек ---
+#define NUM_COILS 12   // Общее количество катушек
 
-// Конфигурация UART
-#define DEBUG_UART        &huart2
-#define DEBUG_BAUDRATE    115200
+// --- Определения геометрии ---
+#define COIL_UPPER_RADIUS 45.0f  // мм
+#define COIL_HEIGHT_LEVEL1 25.0f // мм
+#define COIL_LOWER_RADIUS 25.0f  // мм
+#define COIL_HEIGHT_LEVEL2 5.0f  // мм
 
-// Структура состояния системы
+// --- Структура состояния системы ---
 typedef struct {
     uint8_t coils_enabled;
     uint8_t sensors_enabled;
     uint8_t monitoring_active;
     uint8_t calibration_done;
+    uint8_t levitation_active; // Добавим флаг активности левитации
     uint32_t system_uptime_ms;
     float cpu_usage_percent;
+    float ball_position[3]; // Добавим текущую позицию шара
 } SystemState_t;
 
-// Перечисление режимов работы
-typedef enum {
-    MODE_IDLE = 0,
-    MODE_TEST_COILS,
-    MODE_TEST_SENSORS,
-    MODE_CALIBRATION,
-    MODE_MONITORING,
-    MODE_JOYSTICK,
-    MODE_PID_CONTROL,
-    MODE_FAULT
-} OperationMode_t;
+// --- Структура данных калибровки ---
+typedef struct {
+    uint32_t signature;      // Для проверки валидности
+    uint32_t version;        // Для совместимости
+    float offsets[NUM_SENSORS][3]; // [X, Y, Z] для каждого датчика
+    float scales[NUM_SENSORS][3];   // [X, Y, Z] масштаб для каждого датчика
+    // Добавьте другие параметры калибровки, если есть
+    uint32_t checksum;       // Простой CRC или сумма для проверки целостности
+} CalibrationData_t;
 
-#endif /* __CONFIG_H */
+// --- Определения калибровки ---
+#define CALIBRATION_DATA_SIGNATURE 0xDEADBEEF
+#define CALIBRATION_DATA_VERSION 1
+#define CALIBRATION_DATA_ADDR     (0x00000000UL) // Начало флешки (измени при необходимости)
+
+// --- Определения PID ---
+// Опционально: можно вынести сюда, если используются в нескольких файлах
+// typedef struct {
+//     float Kp[3]; // X, Y, Z
+//     float Ki[3];
+//     float Kd[3];
+//     // ... остальные поля ...
+// } PID_Controller_t;
+
+#endif /* CONFIG_H */

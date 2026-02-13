@@ -1,0 +1,8 @@
+../Core/Src/eeprom.c:10:9:EEPROM_Init	1
+../Core/Src/eeprom.c:17:10:EEPROM_CalculateChecksum	2
+../Core/Src/eeprom.c:30:9:EEPROM_EraseSector	2
+../Core/Src/eeprom.c:66:9:EEPROM_SaveCalibration	11
+../Core/Src/eeprom.c:149:9:EEPROM_LoadCalibration	3
+../Core/Src/eeprom.c:175:9:EEPROM_IsCalibrationValid	4
+../Core/Src/eeprom.c:202:6:EEPROM_ApplyCalibrationToSensors	4
+../Core/Src/eeprom.c:229:6:EEPROM_PrintCalibrationInfo	4

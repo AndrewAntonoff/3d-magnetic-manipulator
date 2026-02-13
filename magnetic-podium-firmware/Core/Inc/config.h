@@ -1,76 +1,117 @@
-#ifndef __CONFIG_H
-#define __CONFIG_H
+#ifndef CONFIG_H
+#define CONFIG_H
 
-// Конфигурация системы
-#define NUM_COILS         12
-#define NUM_SENSORS       8    // Всего пинов сконфигурировано
-#define ACTIVE_SENSORS    5    // Реально подключено датчиков
+#include <stdint.h> // Убедитесь, что stdint.h включен
 
-// Маска активных датчиков (битовая маска)
-// Датчики 0-4 подключены, 5-7 нет
-#define SENSOR_MASK       0x1F  // 0b00011111 (датчики 0,1,2,3,4)
+// --- Определения для датчиков ---
+#define NUM_SENSORS 8  // Общее количество датчиков (даже если не все используются)
+#define ACTIVE_SENSORS 5 // Количество используемых датчиков
 
-// PWM конфигурация
-#define PWM_MAX_VALUE     999.0f
-#define PWM_FREQUENCY     1000  // Гц
+// --- Определения для катушек ---
+#define NUM_COILS 12   // Общее количество катушек
 
-// Лимиты безопасности
-#define MAX_COIL_CURRENT_MA   2000
-#define MAX_DUTY_CYCLE        0.8f
-#define MIN_DUTY_CYCLE        0.0f
-#define OVERCURRENT_THRESHOLD 2500  // мА
+// --- Определения геометрии ---
+#define COIL_UPPER_RADIUS 45.0f  // мм
+#define COIL_HEIGHT_LEVEL1 25.0f // мм
+#define COIL_LOWER_RADIUS 25.0f  // мм
+#define COIL_HEIGHT_LEVEL2 5.0f  // мм
 
-// Конфигурация SPI
-#define SPI_TIMEOUT_MS    100
-#define SPI_SPEED_HZ      1000000  // 1 МГц
+// --- Структура геометрии датчика ---
+typedef struct {
+    float x, y, z;  // Позиция датчика относительно центра чаши
+    float orientation[3];  // Ориентация датчика (вектор нормали) - НЕ ИСПОЛЬЗУЕТСЯ В ТЕКУЩЕМ КОДЕ
+} SensorGeometry_t;
 
-// Конфигурация UART
-#define DEBUG_UART        &huart2
-#define DEBUG_BAUDRATE    115200
+// --- Структура геометрии катушки ---
+typedef struct {
+    float x, y, z;              // Позиция катушки
+    float orientation[3];      // Вектор направления силы
+    float max_force;           // Максимальная сила (N)
+    float resistance_ohm;      // Сопротивление (Ом)
+} CoilGeometry_t;
 
-// Геометрия катушек (в мм)
-#define COIL_UPPER_RADIUS   45.0f  // Верхний уровень (90мм диаметр)
-#define COIL_LOWER_RADIUS   25.0f  // Нижний уровень (50мм диаметр)
-#define COIL_HEIGHT_LEVEL1  25.0f  // Высота верхнего уровня от дна
-#define COIL_HEIGHT_LEVEL2  5.0f   // Высота нижнего уровня от дна
+// --- Структура 3D позиции ---
+typedef struct {
+    float x, y, z;
+    float confidence; // Уверенность в позиции
+    uint32_t timestamp; // Временная метка
+} Position3D_t;
 
-// Структура состояния системы
+// --- Структура состояния системы ---
 typedef struct {
     uint8_t coils_enabled;
     uint8_t sensors_enabled;
     uint8_t monitoring_active;
     uint8_t calibration_done;
+    uint8_t levitation_active; // Добавим флаг активности левитации
     uint32_t system_uptime_ms;
     float cpu_usage_percent;
-    uint8_t levitation_active;  // Флаг активного парения
-    float ball_position[3];     // Позиция шара (x,y,z) в мм
-    float ball_velocity[3];     // Скорость шара
+    float ball_position[3]; // Добавим текущую позицию шара
 } SystemState_t;
 
-// Перечисление режимов работы
+// --- Структура данных калибровки ---
+typedef struct {
+    uint32_t signature;      // Для проверки валидности
+    uint32_t version;        // Для совместимости
+    float offsets[NUM_SENSORS][3]; // [X, Y, Z] для каждого датчика
+    float scales[NUM_SENSORS][3];   // [X, Y, Z] масштаб для каждого датчика
+    // Добавьте другие параметры калибровки, если есть
+    uint32_t checksum;       // Простой CRC или сумма для проверки целостности
+} CalibrationData_t;
+
+// --- Определения калибровки ---
+#define CALIBRATION_DATA_SIGNATURE 0xDEADBEEF
+#define CALIBRATION_DATA_VERSION 1
+#define CALIBRATION_DATA_ADDR     (0x00000000UL)
+
+// --- Структура HID отчета для джойстика ---
+#pragma pack(push, 1) // Упаковка структуры без выравнивания
+typedef struct {
+    uint8_t report_id; // 0x01 (если используется ID)
+    int16_t x;         // Signed 16-bit
+    int16_t y;         // Signed 16-bit
+    int16_t z;         // Signed 16-bit
+    int16_t rx;        // Signed 16-bit (Pitch)
+    int16_t ry;        // Signed 16-bit (Yaw)
+    int16_t rz;        // Signed 16-bit (Roll)
+    uint32_t buttons;  // 32 бит для кнопок (LSB first)
+} HID_JoystickReport_TypeDef;
+#pragma pack(pop)
+
+// --- Определения для катушек (coil_driver.c) ---
+#define PWM_MAX_VALUE 1000.0f // Максимальное значение PWM (например, ARR таймера)
+#define OVERCURRENT_THRESHOLD 1000.0f // Порог тока в mA (примерное значение)
+
+// --- Определения PID (levitation_control.c) ---
 typedef enum {
-    MODE_IDLE = 0,
-    MODE_TEST_COILS,
-    MODE_TEST_SENSORS,
+    MODE_IDLE,
     MODE_CALIBRATION,
-    MODE_MONITORING,
-    MODE_JOYSTICK,
-    MODE_PID_CONTROL,
-    MODE_LEVITATION,    // Режим парения
-    MODE_FAULT
+    MODE_LEVITATION,
+    MODE_ERROR
 } OperationMode_t;
 
-// ПИД параметры для парения
 typedef struct {
-    float Kp[3];  // X, Y, Z
+    float Kp[3]; // X, Y, Z
     float Ki[3];
     float Kd[3];
     float integral[3];
     float prev_error[3];
-    float setpoint[3];  // Целевая позиция
-    float output[3];    // Выходной сигнал
-    float max_integral; // Анти-виндъяп
-    float max_output;   // Ограничение выхода
+    float setpoint[3];
+    float output[3];
+    float max_integral;
+    float max_output;
 } PID_Controller_t;
 
-#endif /* __CONFIG_H */
+// --- Определения для QSPI Flash (qspi_flash.c) ---
+// Команды W25Q64JV
+#define W25Q_WRITE_ENABLE         0x06
+#define W25Q_WRITE_DISABLE        0x04
+#define W25Q_READ_STATUS_REG      0x05
+#define W25Q_READ_DATA            0x03
+#define W25Q_FAST_READ_DATA       0x0B
+#define W25Q_PAGE_PROGRAM         0x02
+#define W25Q_SECTOR_ERASE         0x20
+#define W25Q_CHIP_ERASE           0xC7
+#define W25Q_JEDEC_ID             0x9F
+
+#endif /* CONFIG_H */

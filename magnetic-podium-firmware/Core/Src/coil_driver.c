@@ -1,9 +1,10 @@
 #include "coil_driver.h"
-#include "debug_console.h"  // Для Debug_Print и LOG_LEVEL_*
-#include "tim.h"  // Для htim1/2/3
-#include <string.h>
-#include <stdio.h>
-#include <math.h>
+#include "config.h" // <-- Добавить, чтобы получить PWM_MAX_VALUE, OVERCURRENT_THRESHOLD
+#include "main.h" // Для HAL и GPIO
+#include "tim.h" // Для HAL_TIM_PWM_Start/Stop, __HAL_TIM_SET_COMPARE
+#include "gpio.h" // Для HAL_GPIO_WritePin
+#include <string.h> // Для strcpy, strcmp, memset, strlen, strncat
+#include <stdio.h>  // Для snprintf
 
 // Массив катушек
 Coil_t coils[NUM_COILS];

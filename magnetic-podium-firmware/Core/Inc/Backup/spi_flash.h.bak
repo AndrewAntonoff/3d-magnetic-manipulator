@@ -1,0 +1,63 @@
+#ifndef __SPI_FLASH_H
+#define __SPI_FLASH_H
+
+#include "main.h" // Подключаем HAL и определения пинов из CubeMX
+#include <stdint.h>
+#include <stdbool.h>
+
+// --- Настройка пина CS ---
+// Определите пин CS для вашей Flash в CubeMX и добавьте его в main.h
+// Пример: #define FLASH_CS_GPIO_Port GPIOA
+//         #define FLASH_CS_Pin GPIO_PIN_4
+// Ниже предполагается, что вы настроили CS как GPIO_Output в CubeMX
+// и добавили определения в main.h.
+// Если вы не добавляли, создайте их:
+// #define FLASH_CS_GPIO_Port GPIOB
+// #define FLASH_CS_Pin GPIO_PIN6
+// Проверьте, что этот пин не конфликтует с пинами датчиков (PC0-PC7).
+// Если да, выделите другой свободный пин (например, PB6) и настройте его в CubeMX.
+// Ниже используется предполагаемое имя. ЗАМЕНИТЕ НА ВАШЕ!
+#define FLASH_CS_GPIO_Port GPIOB // <-- ЗАМЕНИТЕ НА ВАШ ПОРТ
+#define FLASH_CS_Pin GPIO_PIN6   // <-- ЗАМЕНИТЕ НА ВАШ ПИН
+
+// --- Команды для W25Q64JV ---
+#define W25X_WriteEnable		      0x06
+#define W25X_WriteDisable		      0x04
+#define W25X_ReadStatusReg		    0x05
+#define W25X_WriteStatusReg		    0x01
+#define W25X_ReadData			        0x03
+#define W25X_FastReadData		      0x0B
+#define W25X_FastReadDual		      0x3B
+#define W25X_PageProgram		      0x02
+#define W25X_BlockErase			      0xD8
+#define W25X_SectorErase		      0x20
+#define W25X_ChipErase			      0xC7
+#define W25X_PowerDown			      0xB9
+#define W25X_ReleasePowerDown	    0xAB
+#define W25X_DeviceID			        0xAB
+#define W25X_ManufactDeviceID	    0x90
+#define W25X_JedecDeviceID		    0x9F
+
+// --- Макросы для удобства ---
+#define FLASH_CS_LOW()       HAL_GPIO_WritePin(FLASH_CS_GPIO_Port, FLASH_CS_Pin, GPIO_PIN_RESET)
+#define FLASH_CS_HIGH()      HAL_GPIO_WritePin(FLASH_CS_GPIO_Port, FLASH_CS_Pin, GPIO_PIN_SET)
+
+// --- Размеры ---
+#define PAGE_SIZE           256
+#define SECTOR_SIZE         4096 // 4KB
+#define BLOCK_SIZE          65536 // 64KB
+#define FLASH_SIZE          (8UL * 1024UL * 1024UL) // 8MB
+
+// --- Прототипы функций ---
+bool Flash_Init(SPI_HandleTypeDef *hspi);
+uint32_t Flash_ReadJEDECID(void);
+uint8_t Flash_ReadSR(void);
+void Flash_WriteEnable(void);
+void Flash_WaitForWriteEnd(void);
+uint8_t Flash_ReadByte(uint32_t addr);
+void Flash_ReadBuffer(uint32_t addr, uint8_t *buf, uint32_t len);
+void Flash_WritePage(uint32_t addr, uint8_t *buf, uint32_t len);
+void Flash_EraseSector(uint32_t addr);
+void Flash_WriteBuffer(uint32_t addr, uint8_t *buf, uint32_t len);
+
+#endif /* __SPI_FLASH_H */

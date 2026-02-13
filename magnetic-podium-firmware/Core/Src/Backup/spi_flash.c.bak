@@ -1,0 +1,165 @@
+#include "spi_flash.h"
+#include "string.h" // Для memcpy
+
+// Внешняя ссылка на SPI хэндл
+extern SPI_HandleTypeDef hspi1; // Предполагается, что ваш SPI1 инициализирован в main.c
+
+static SPI_HandleTypeDef *flash_hspi;
+
+// --- Внутренние вспомогательные функции ---
+static void Flash_WriteEnable(void) {
+    uint8_t cmd = W25X_WriteEnable;
+    FLASH_CS_LOW();
+    HAL_SPI_Transmit(flash_hspi, &cmd, 1, 100);
+    FLASH_CS_HIGH();
+}
+
+static uint8_t Flash_ReadSR(void) {
+    uint8_t cmd = W25X_ReadStatusReg;
+    uint8_t dummy = 0x00;
+    uint8_t status = 0x00;
+
+    FLASH_CS_LOW();
+    HAL_SPI_Transmit(flash_hspi, &cmd, 1, 100);
+    HAL_SPI_TransmitReceive(flash_hspi, &dummy, &status, 1, 100);
+    FLASH_CS_HIGH();
+
+    return status;
+}
+
+static void Flash_WaitForWriteEnd(void) {
+    uint8_t status;
+    do {
+        status = Flash_ReadSR();
+    } while ((status & 0x01) == 0x01); // Проверяем Busy Bit (бит 0)
+}
+
+// --- Публичный API ---
+
+bool Flash_Init(SPI_HandleTypeDef *hspi) {
+    flash_hspi = hspi;
+
+    // Убедиться, что CS в высоком состоянии
+    FLASH_CS_HIGH();
+
+    // Проверить ID
+    uint32_t jedec_id = Flash_ReadJEDECID();
+    // Пример проверки для W25Q64JV: Manuf ID: 0xEF, Mem Type: 0x40, Capacity: 0x17
+    // uint8_t manuf_id = (jedec_id >> 16) & 0xFF;
+    // uint8_t mem_type = (jedec_id >> 8) & 0xFF;
+    // uint8_t capacity = jedec_id & 0xFF;
+    // printf("Flash JEDEC ID: 0x%06lX (Manuf: 0x%02X, Type: 0x%02X, Cap: 0x%02X)\n", jedec_id, manuf_id, mem_type, capacity);
+
+    // Выход из Power Down режима, если вдруг там
+    uint8_t cmd = W25X_ReleasePowerDown;
+    FLASH_CS_LOW();
+    HAL_SPI_Transmit(flash_hspi, &cmd, 1, 100);
+    FLASH_CS_HIGH();
+    HAL_Delay(3); // tRES1 (до 3ms)
+
+    // Простая проверка - считать первый байт, должен быть 0xFF если не записан
+    uint8_t first_byte = Flash_ReadByte(0);
+    if(jedec_id == 0xFFFFFF || jedec_id == 0x000000) {
+        // printf("Flash init failed: Invalid JEDEC ID (0x%06lX)\n", jedec_id);
+        return false;
+    }
+    // printf("Flash initialized. First byte at 0x0000: 0x%02X\n", first_byte);
+    return true;
+}
+
+uint32_t Flash_ReadJEDECID(void) {
+    uint8_t cmd = W25X_JedecDeviceID;
+    uint8_t id[3] = {0};
+
+    FLASH_CS_LOW();
+    HAL_SPI_Transmit(flash_hspi, &cmd, 1, 100);
+    HAL_SPI_Receive(flash_hspi, id, 3, 100);
+    FLASH_CS_HIGH();
+
+    return (id[0] << 16) | (id[1] << 8) | id[2];
+}
+
+uint8_t Flash_ReadByte(uint32_t addr) {
+    uint8_t cmd[4] = {W25X_ReadData, (uint8_t)(addr >> 16), (uint8_t)(addr >> 8), (uint8_t)addr};
+    uint8_t dummy = 0x00;
+    uint8_t data = 0x00;
+
+    FLASH_CS_LOW();
+    HAL_SPI_Transmit(flash_hspi, cmd, 4, 100);
+    HAL_SPI_TransmitReceive(flash_hspi, &dummy, &data, 1, 100);
+    FLASH_CS_HIGH();
+
+    return data;
+}
+
+void Flash_ReadBuffer(uint32_t addr, uint8_t *buf, uint32_t len) {
+    uint8_t cmd[4] = {W25X_ReadData, (uint8_t)(addr >> 16), (uint8_t)(addr >> 8), (uint8_t)addr};
+    uint8_t dummy = 0x00;
+
+    FLASH_CS_LOW();
+    HAL_SPI_Transmit(flash_hspi, cmd, 4, 100);
+    // Для длинных передач лучше использовать HAL_SPI_Receive
+    HAL_SPI_Receive(flash_hspi, buf, len, 1000); // Увеличен таймаут
+    FLASH_CS_HIGH();
+}
+
+void Flash_WritePage(uint32_t addr, uint8_t *buf, uint32_t len) {
+    if(len == 0) return;
+    if(len > PAGE_SIZE) len = PAGE_SIZE; // Ограничить длину страницей
+
+    Flash_WriteEnable();
+
+    uint8_t cmd[4] = {W25X_PageProgram, (uint8_t)(addr >> 16), (uint8_t)(addr >> 8), (uint8_t)addr};
+
+    FLASH_CS_LOW();
+    HAL_SPI_Transmit(flash_hspi, cmd, 4, 100);
+    HAL_SPI_Transmit(flash_hspi, buf, len, 1000); // Увеличен таймаут
+    FLASH_CS_HIGH();
+
+    Flash_WaitForWriteEnd();
+}
+
+void Flash_EraseSector(uint32_t addr) {
+    // Адрес должен быть выровнен на границу сектора (4KB)
+    addr &= ~(SECTOR_SIZE - 1);
+
+    Flash_WriteEnable();
+
+    uint8_t cmd[4] = {W25X_SectorErase, (uint8_t)(addr >> 16), (uint8_t)(addr >> 8), (uint8_t)addr};
+
+    FLASH_CS_LOW();
+    HAL_SPI_Transmit(flash_hspi, cmd, 4, 100);
+    FLASH_CS_HIGH();
+
+    Flash_WaitForWriteEnd(); // Стирание сектора может занять до 400ms
+}
+
+void Flash_WriteBuffer(uint32_t addr, uint8_t *buf, uint32_t len) {
+    uint32_t page_addr = addr;
+    uint32_t num_of_page = 0;
+    uint32_t num_of_single = 0;
+    uint32_t idx = 0;
+    uint32_t remain_addr = 0;
+    uint32_t remain_len = len;
+    uint32_t write_len = 0;
+
+    // Вычисляем, сколько целых страниц и остаток
+    num_of_page = len / PAGE_SIZE;
+    num_of_single = len % PAGE_SIZE;
+
+    if(num_of_page == 0) { // Если длина меньше страницы
+        Flash_WritePage(page_addr, buf, num_of_single);
+        return;
+    }
+
+    // Запись целых страниц
+    for(; idx < num_of_page; idx++) {
+        Flash_WritePage(page_addr, buf + (idx * PAGE_SIZE), PAGE_SIZE);
+        page_addr += PAGE_SIZE;
+    }
+
+    // Запись оставшихся байт
+    if(num_of_single != 0) {
+        Flash_WritePage(page_addr, buf + (num_of_page * PAGE_SIZE), num_of_single);
+    }
+}

@@ -1,23 +1,16 @@
-#ifndef __SENSOR_MLX90393_H
-#define __SENSOR_MLX90393_H
+#ifndef SENSOR_MLX90393_H
+#define SENSOR_MLX90393_H
 
 #include "main.h"
-#include "config.h"
+#include "config.h" // Position3D_t уже определен здесь!
+#include <stdint.h>
 
-// Геометрия датчиков (в мм)
-typedef struct {
-    float x, y, z;  // Позиция датчика относительно центра чаши
-    float orientation[3];  // Ориентация датчика (вектор нормали)
-} SensorGeometry_t;
-
-// Структура датчика MLX90393
+// --- Структура датчика MLX90393 ---
 typedef struct {
     // Аппаратная конфигурация
     SPI_HandleTypeDef* spi;
     GPIO_TypeDef* cs_port;
     uint16_t cs_pin;
-
-    // Геометрия
     SensorGeometry_t geometry;
 
     // Данные
@@ -43,14 +36,6 @@ typedef struct {
     float average_read_time_ms;
 } MLX90393_t;
 
-// Структура для 3D позиции
-typedef struct {
-    float x;  // мм
-    float y;  // мм
-    float z;  // мм
-    float confidence;  // 0.0 - 1.0
-    uint32_t timestamp;
-} Position3D_t;
 
 // Прототипы функций
 void Sensors_Init(void);

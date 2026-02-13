@@ -1,10 +1,28 @@
 #include "levitation_control.h"
 #include "config.h"
 #include "coil_driver.h"
-#include "sensor_mlx90393.h"
+#include "sensor_mlx90393.h" // Зависит от config.h
 #include "debug_console.h"
 #include <math.h>
 #include <string.h>
+#include <stdio.h> // Для snprintf
+
+extern MLX90393_t sensors[NUM_SENSORS]; // <-- Объявление extern в .c файле
+
+// --- ОПРЕДЕЛЕНИЕ ГЛОБАЛЬНЫХ ПЕРЕМЕННЫХ ---
+SystemState_t system_state = {
+    .coils_enabled = 0,
+    .sensors_enabled = 0,
+    .monitoring_active = 0,
+    .calibration_done = 0,
+    .levitation_active = 0,
+    .system_uptime_ms = 0,
+    .cpu_usage_percent = 0.0f,
+    .ball_position = {0.0f, 0.0f, 0.0f}
+};
+
+OperationMode_t current_mode = MODE_IDLE; // Инициализируем начальным режимом
+
 
 // Определяем глобальные переменные
 PID_Controller_t pid_controller = {

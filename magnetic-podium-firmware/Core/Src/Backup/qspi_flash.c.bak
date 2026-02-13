@@ -1,0 +1,200 @@
+#include "qspi_flash.h"
+#include "string.h"
+#include "stdio.h" // Для snprintf, если используется внутри
+
+extern QSPI_HandleTypeDef hquadspi; // Внешняя ссылка на хэндл из main.c
+
+// --- Вспомогательные функции (обновлены для H7 API) ---
+static void QSPI_WriteEnable(void) {
+    QSPI_CommandTypeDef cmd = {0};
+    // InstructionSize НЕТ в H7, используется InstructionMode
+    cmd.Instruction = W25Q_WRITE_ENABLE;
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE; // или QSPI_INSTRUCTION_4_LINES если используем 4-линии
+    cmd.AddressMode = QSPI_ADDRESS_NONE;
+    cmd.AlternateByteMode = QSPI_ALTERNATE_BYTES_NONE;
+    cmd.DataMode = QSPI_DATA_NONE;
+    cmd.DummyCycles = 0;
+    // OperationType НЕТ в H7, используем только команды
+    // cmd.OperationType = QSPI_OPTYPE_COMMON_CFG; // <-- УДАЛЕНО
+
+    if (HAL_QSPI_Command(&hquadspi, &cmd, HAL_MAX_DELAY) != HAL_OK) {
+        // Error_Handler(); // Замените на свою обработку ошибок
+        return;
+    }
+}
+
+static uint8_t QSPI_ReadStatus(void) {
+    QSPI_CommandTypeDef cmd = {0};
+    uint8_t status = 0;
+
+    cmd.Instruction = W25Q_READ_STATUS_REG;
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.AddressMode = QSPI_ADDRESS_NONE;
+    cmd.AlternateByteMode = QSPI_ALTERNATE_BYTES_NONE;
+    cmd.DataMode = QSPI_DATA_1_LINE; // или QSPI_DATA_4_LINES
+    cmd.NbData = 1;
+    cmd.DummyCycles = 0;
+    // OperationType НЕТ в H7
+    // cmd.OperationType = QSPI_OPTYPE_COMMON_CFG; // <-- УДАЛЕНО
+
+    if (HAL_QSPI_Command(&hquadspi, &cmd, HAL_MAX_DELAY) != HAL_OK) {
+        return 0xFF;
+    }
+
+    if (HAL_QSPI_Receive(&hquadspi, &status, HAL_MAX_DELAY) != HAL_OK) {
+        return 0xFF;
+    }
+
+    return status;
+}
+
+static void QSPI_WaitForWriteEnd(void) {
+    uint8_t status;
+    do {
+        status = QSPI_ReadStatus();
+    } while (status & 0x01); // Проверяем Busy Bit (бит 0)
+}
+
+// --- Публичный API (обновлен для H7 API) ---
+
+bool QSPI_Flash_Init(void) {
+    // Инициализация QSPI уже сделана в MX_QUADSPI_Init()
+    // Проверим JEDEC ID
+    uint32_t jedec_id = QSPI_Flash_ReadJEDECID();
+    // Для W25Q64JV: Manuf ID = 0xEF, Mem Type = 0x40, Capacity = 0x17
+    // if ((jedec_id >> 16) != 0xEF || ((jedec_id >> 8) & 0xFF) != 0x40) {
+    //     return false;
+    // }
+    return true;
+}
+
+uint32_t QSPI_Flash_ReadJEDECID(void) {
+    QSPI_CommandTypeDef cmd = {0};
+    uint8_t id[3] = {0};
+
+    cmd.Instruction = W25Q_JEDEC_ID;
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.AddressMode = QSPI_ADDRESS_NONE;
+    cmd.AlternateByteMode = QSPI_ALTERNATE_BYTES_NONE;
+    cmd.DataMode = QSPI_DATA_1_LINE; // или QSPI_DATA_4_LINES
+    cmd.NbData = 3;
+    cmd.DummyCycles = 0;
+    // OperationType НЕТ в H7
+    // cmd.OperationType = QSPI_OPTYPE_COMMON_CFG; // <-- УДАЛЕНО
+
+    if (HAL_QSPI_Command(&hquadspi, &cmd, HAL_MAX_DELAY) != HAL_OK) {
+        return 0xFFFFFFFF;
+    }
+
+    if (HAL_QSPI_Receive(&hquadspi, id, HAL_MAX_DELAY) != HAL_OK) {
+        return 0xFFFFFFFF;
+    }
+
+    return (id[0] << 16) | (id[1] << 8) | id[2];
+}
+
+void QSPI_Flash_EraseSector(uint32_t address) {
+    QSPI_CommandTypeDef cmd = {0};
+
+    // Адрес должен быть выровнен на границу сектора (4KB)
+    address &= ~(4096UL - 1);
+
+    QSPI_WriteEnable();
+
+    cmd.Instruction = W25Q_SECTOR_ERASE;
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.AddressMode = QSPI_ADDRESS_1_LINE; // или QSPI_ADDRESS_4_LINES
+    cmd.AddressSize = QSPI_ADDRESS_24_BITS; // или QSPI_ADDRESS_32_BITS
+    cmd.Address = address;
+    cmd.AlternateByteMode = QSPI_ALTERNATE_BYTES_NONE;
+    cmd.DataMode = QSPI_DATA_NONE;
+    cmd.DummyCycles = 0;
+    // OperationType НЕТ в H7
+    // cmd.OperationType = QSPI_OPTYPE_COMMON_CFG; // <-- УДАЛЕНО
+
+    HAL_QSPI_Command(&hquadspi, &cmd, HAL_MAX_DELAY);
+    QSPI_WaitForWriteEnd();
+}
+
+void QSPI_Flash_WritePage(uint32_t address, const uint8_t *data, uint32_t len) {
+    if(len == 0) return;
+    if(len > 256) len = 256; // Ограничение на страницу
+
+    QSPI_CommandTypeDef cmd = {0};
+    QSPI_AutoPollingTypeDef config = {0};
+
+    QSPI_WriteEnable();
+
+    cmd.Instruction = W25Q_PAGE_PROGRAM;
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.AddressMode = QSPI_ADDRESS_1_LINE;
+    cmd.AddressSize = QSPI_ADDRESS_24_BITS;
+    cmd.Address = address;
+    cmd.AlternateByteMode = QSPI_ALTERNATE_BYTES_NONE;
+    cmd.DataMode = QSPI_DATA_1_LINE; // или QSPI_DATA_4_LINES
+    cmd.NbData = len;
+    cmd.DummyCycles = 0;
+    // OperationType НЕТ в H7
+    // cmd.OperationType = QSPI_OPTYPE_COMMON_CFG; // <-- УДАЛЕНО
+
+    HAL_QSPI_Command(&hquadspi, &cmd, HAL_MAX_DELAY);
+    HAL_QSPI_Transmit(&hquadspi, (uint8_t*)data, HAL_MAX_DELAY);
+
+    // Ждем завершения записи через опрос состояния
+    config.Match = 0x00;
+    config.Mask = 0x01;
+    // config.MatchMode = QSPI_AUTOPOLLING_MATCH_MODE_AND; // <-- УДАЛЕНО или заменено
+    config.MatchMode = QSPI_MATCH_MODE_AND; // Проверьте правильное имя в H7 HAL
+    config.Interval = 0x10;
+    config.StatusBytesSize = 1;
+    config.AutomaticStop = QSPI_AUTOMATIC_STOP_ENABLE;
+
+    cmd.Instruction = W25Q_READ_STATUS_REG;
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.DataMode = QSPI_DATA_1_LINE;
+    cmd.NbData = 1;
+    // OperationType НЕТ в H7
+    // cmd.OperationType = QSPI_OPTYPE_COMMON_CFG; // <-- УДАЛЕНО
+    cmd.AddressMode = QSPI_ADDRESS_NONE;
+    cmd.DdrMode = QSPI_DDR_MODE_DISABLE;
+    cmd.DdrHoldHalfCycle = QSPI_DDR_HHC_ANALOG_DELAY;
+    cmd.SIOOMode = QSPI_SIOO_INST_EVERY_CMD;
+
+    HAL_QSPI_AutoPolling(&hquadspi, &cmd, &config, HAL_MAX_DELAY);
+}
+
+void QSPI_Flash_WriteBuffer(uint32_t address, const uint8_t *data, uint32_t len) {
+    uint32_t page_addr = address;
+    uint32_t num_of_page = len / 256;
+    uint32_t num_of_single = len % 256;
+    uint32_t idx = 0;
+
+    // Запись целых страниц
+    for(; idx < num_of_page; idx++) {
+        QSPI_Flash_WritePage(page_addr + (idx * 256), data + (idx * 256), 256);
+    }
+
+    // Запись остатка
+    if(num_of_single != 0) {
+        QSPI_Flash_WritePage(page_addr + (num_of_page * 256), data + (num_of_page * 256), num_of_single);
+    }
+}
+
+void QSPI_Flash_ReadBuffer(uint32_t address, uint8_t *data, uint32_t len) {
+    QSPI_CommandTypeDef cmd = {0};
+
+    cmd.Instruction = W25Q_READ_DATA;
+    cmd.InstructionMode = QSPI_INSTRUCTION_1_LINE;
+    cmd.AddressMode = QSPI_ADDRESS_1_LINE;
+    cmd.AddressSize = QSPI_ADDRESS_24_BITS;
+    cmd.Address = address;
+    cmd.AlternateByteMode = QSPI_ALTERNATE_BYTES_NONE;
+    cmd.DataMode = QSPI_DATA_1_LINE; // или QSPI_DATA_4_LINES
+    cmd.NbData = len;
+    cmd.DummyCycles = 0;
+    // OperationType НЕТ в H7
+    // cmd.OperationType = QSPI_OPTYPE_COMMON_CFG; // <-- УДАЛЕНО
+
+    HAL_QSPI_Command(&hquadspi, &cmd, HAL_MAX_DELAY);
+    HAL_QSPI_Receive(&hquadspi, data, HAL_MAX_DELAY);
+}

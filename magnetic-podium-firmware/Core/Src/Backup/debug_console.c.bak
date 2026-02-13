@@ -23,20 +23,13 @@ void Debug_Print(LogLevel_t level, const char* format, ...) {
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
 
-    HAL_UART_Transmit(debug_uart, (uint8_t*)buffer, strlen(buffer), 100);
-}
+    // Убираем лишние пробелы и перенос строки в начале
+    // Добавляем timestamp
+    char timed_buffer[300];
+    snprintf(timed_buffer, sizeof(timed_buffer), "[%lu] %s\r\n",
+             (unsigned long)HAL_GetTick(), buffer);
 
-void Debug_Print_Raw(const char* format, ...) {
-    if(debug_uart == NULL) return;
-
-    char buffer[256];
-    va_list args;
-
-    va_start(args, format);
-    vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-
-    HAL_UART_Transmit(debug_uart, (uint8_t*)buffer, strlen(buffer), 100);
+    HAL_UART_Transmit(debug_uart, (uint8_t*)timed_buffer, strlen(timed_buffer), 100);
 }
 
 void Debug_Set_Log_Level(LogLevel_t level) {
@@ -48,15 +41,15 @@ void Debug_Set_Output_Format(OutputFormat_t format) {
 }
 
 void Console_Process_Command(const char* command) {
-    // Реализация обработки команд
+    // Реализация обработки команд (используется в main.c)
 }
 
 void Console_Show_Help(void) {
-    // Реализация показа справки
+    // Реализация показа справки (используется в main.c)
 }
 
 void Console_Show_Status(void) {
-    // Реализация показа статуса
+    // Реализация показа статуса (используется в main.c)
 }
 
 void Start_RealTime_Monitoring(uint32_t interval_ms) {

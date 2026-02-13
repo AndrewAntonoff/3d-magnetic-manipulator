@@ -1,0 +1,2 @@
+../Core/Src/usbd_hid_if.c:37:9:USBD_CUSTOM_HID_GetHidDescriptor	1
+../Core/Src/usbd_hid_if.c:43:9:USBD_CUSTOM_HID_GetReportDescriptor	1

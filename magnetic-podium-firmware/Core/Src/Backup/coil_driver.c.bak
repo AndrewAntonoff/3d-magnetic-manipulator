@@ -1,4 +1,6 @@
 #include "coil_driver.h"
+#include "debug_console.h"  // Для Debug_Print и LOG_LEVEL_*
+#include "tim.h"  // Для htim1/2/3
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -12,11 +14,46 @@ void Coils_Init(void) {
     for(int i = 0; i < NUM_COILS; i++) {
         coils[i].current_pwm = 0.0f;
         coils[i].target_pwm = 0.0f;
-        coils[i].enabled_time_ms = 0;
         coils[i].is_faulty = 0;
-        coils[i].total_on_time_ms = 0;
-        coils[i].activation_count = 0;
-        memset(coils[i].fault_reason, 0, sizeof(coils[i].fault_reason));
+
+        // DIR порт и пин (из main.h)
+        coils[i].dir_port = GPIOE;  // Все катушки на GPIOE
+
+        // Назначение dir_pin - исправленный порядок:
+        switch(i) {
+            case 0: coils[i].dir_pin = Coil1_DIR_Pin; break;  // PE0
+            case 1: coils[i].dir_pin = Coil2_DIR_Pin; break;  // PE1
+            case 2: coils[i].dir_pin = Coil3_DIR_Pin; break;  // PE2
+            case 3: coils[i].dir_pin = Coil4_DIR_Pin; break;  // PE3
+            case 4: coils[i].dir_pin = Coil5_DIR_Pin; break;  // PE4
+            case 5: coils[i].dir_pin = Coil6_DIR_Pin; break;  // PE5
+            case 6: coils[i].dir_pin = Coil7_DIR_Pin; break;  // PE6
+            case 7: coils[i].dir_pin = Coil8_DIR_Pin; break;  // PE7
+            case 8: coils[i].dir_pin = Coil9_DIR_Pin; break;  // PE8
+            case 9: coils[i].dir_pin = Coil10_DIR_Pin; break; // PE10
+            case 10: coils[i].dir_pin = Coil11_DIR_Pin; break; // PE12
+            case 11: coils[i].dir_pin = Coil12_DIR_Pin; break; // PE15
+            default: coils[i].dir_pin = GPIO_PIN_0;
+        }
+
+        // PWM timers и channels - ВАЖНО: соответствие CubeMX
+        // TIM1: PE9 (CH1), PE11 (CH2), PE13 (CH3), PE14 (CH4)
+        // TIM2: PA0 (CH1), PA1 (CH2), PA2 (CH3), PA3 (CH4)
+        // TIM3: PA6 (CH1), PA7 (CH2), PB0 (CH3), PB1 (CH4)
+
+        if (i < 4) {
+            // Первые 4 катушки на TIM1
+            coils[i].timer = &htim1;
+            coils[i].channel = TIM_CHANNEL_1 + i;  // i=0 → CH1, i=1 → CH2, i=2 → CH3, i=3 → CH4
+        } else if (i < 8) {
+            // Следующие 4 катушки на TIM2
+            coils[i].timer = &htim2;
+            coils[i].channel = TIM_CHANNEL_1 + (i - 4);  // i=4 → CH1, i=5 → CH2, i=6 → CH3, i=7 → CH4
+        } else {
+            // Последние 4 катушки на TIM3
+            coils[i].timer = &htim3;
+            coils[i].channel = TIM_CHANNEL_1 + (i - 8);  // i=8 → CH1, i=9 → CH2, i=10 → CH3, i=11 → CH4
+        }
     }
 }
 
@@ -27,11 +64,25 @@ void Set_Coil_Power(uint8_t coil_idx, float power) {
     if(power > 1.0f) power = 1.0f;
     if(power < -1.0f) power = -1.0f;
 
+    Coil_t *coil = &coils[coil_idx];
+
+    // Установка направления
+    if(power >= 0) {
+        HAL_GPIO_WritePin(coil->dir_port, coil->dir_pin, GPIO_PIN_RESET);  // Positive
+    } else {
+        HAL_GPIO_WritePin(coil->dir_port, coil->dir_pin, GPIO_PIN_SET);    // Negative
+        power = -power;  // Абсолютное для PWM
+    }
+
+    // Реальная установка PWM
+    uint32_t compare = (uint32_t)(power * PWM_MAX_VALUE);
+    __HAL_TIM_SET_COMPARE(coil->timer, coil->channel, compare);
+
     coils[coil_idx].current_pwm = power;
     coils[coil_idx].target_pwm = power;
 
-    // Здесь должна быть реальная установка PWM через HAL
-    // Например: __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (uint32_t)(power * PWM_MAX_VALUE));
+    // Лог
+    Debug_Print(LOG_LEVEL_INFO, "Coil %d set to %.2f\r\n", coil_idx, power);
 }
 
 void Set_All_Coils_Power(float power) {
@@ -82,6 +133,7 @@ void Process_Coil_Test(void) {
            (coil_test.test_pwm_step < 0 && current_pwm >= coil_test.test_pwm_end)) {
             Set_Coil_Power(coil_test.coil_index, current_pwm);
             coil_test.steps_completed = current_step;
+            Debug_Print(LOG_LEVEL_INFO, "Test step %d: PWM %.2f\r\n", current_step, current_pwm);
         } else {
             Stop_Coil_Test();
             Set_Coil_Power(coil_test.coil_index, 0.0f);
@@ -96,9 +148,8 @@ uint8_t Is_Coil_Test_Running(void) {
 void Check_Coils_Safety(void) {
     // Проверка безопасности катушек
     for(int i = 0; i < NUM_COILS; i++) {
-        // Проверка на перегрев, перегрузку и т.д.
+        // Проверка на overpower
         if(fabs(coils[i].current_pwm) > 0.8f) {
-            // Если мощность слишком высокая
             if(!coils[i].is_faulty) {
                 coils[i].is_faulty = 1;
                 strcpy(coils[i].fault_reason, "Overpower");
@@ -107,6 +158,15 @@ void Check_Coils_Safety(void) {
             if(coils[i].is_faulty && strcmp(coils[i].fault_reason, "Overpower") == 0) {
                 coils[i].is_faulty = 0;
             }
+        }
+
+        // Пример проверки overcurrent (реализуйте Read_ADC_Current если есть ADC)
+        // coils[i].current_ma = Read_ADC_Current(i);  // Заглушка
+        if(coils[i].current_ma > OVERCURRENT_THRESHOLD) {
+            coils[i].is_faulty = 1;
+            strcpy(coils[i].fault_reason, "Overcurrent");
+            Set_Coil_Power(i, 0.0f);
+            Debug_Print(LOG_LEVEL_ERROR, "Fault on coil %d: %s\r\n", i, coils[i].fault_reason);
         }
     }
 }
@@ -133,7 +193,7 @@ void Get_Coils_Status_String(char* buffer, uint16_t buffer_size) {
     for(int i = 0; i < NUM_COILS; i++) {
         char temp[16];
         snprintf(temp, sizeof(temp), "%.2f ", coils[i].current_pwm);
-        strcat(buffer, temp);
+        strncat(buffer, temp, buffer_size - strlen(buffer) - 1);  // Безопасный strcat
     }
 }
 
