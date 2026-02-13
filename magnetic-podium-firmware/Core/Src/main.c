@@ -139,6 +139,18 @@ void Show_Help_Menu(void);
 void Show_System_Status(void);
 void Stream_Sensor_Data(void); // Добавлено
 void Error_Handler(void); // Убедитесь, что только одна реализация
+/* USER CODE BEGIN PFP */
+uint8_t Read_Sensor_With_Gain(uint8_t sensor_idx);
+void Calibrate_Offset_Procedure(uint8_t sensor_idx);
+uint8_t Read_Sensor_Calibrated(uint8_t sensor_idx);
+void Save_Calibration_To_Flash(void);
+void Load_Calibration_From_Flash(void);
+uint8_t Quick_Read_Sensor(uint8_t sensor_idx);
+uint8_t Read_Sensor(uint8_t sensor_idx);
+void Calibrate_Sensors_Start(void);
+void Get_Sensor_Stats_String(char *buffer, uint16_t buffer_size);
+uint8_t Test_Sensor_Connection(uint8_t sensor_idx);
+/* USER CODE END PFP */
 
 // Прототипы для HID
 void Calculate_3D_Position(void); // Заглушка для алгоритма позиции
@@ -221,7 +233,7 @@ void Show_Help_Menu(void) {
     Debug_Print(LOG_LEVEL_INFO, "help - Show this menu\r\n");
     Debug_Print(LOG_LEVEL_INFO, "status - Show system status\r\n");
     Debug_Print(LOG_LEVEL_INFO, "sensor <idx> - Read sensor data\r\n");
-    Debug_Print(LOG_LEVEL_INFO, "calibrate - Start sensor calibration (remove magnet first)\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "calibrate [idx] - Calibrate sensor offset (all sensors if no index)");
     Debug_Print(LOG_LEVEL_INFO, "save_cal - Save calibration data to flash\r\n");
     Debug_Print(LOG_LEVEL_INFO, "load_cal - Load calibration data from flash\r\n");
     Debug_Print(LOG_LEVEL_INFO, "start_stream [interval_ms] - Start data streaming (default: 50 ms)\r\n");
@@ -229,6 +241,12 @@ void Show_Help_Menu(void) {
     Debug_Print(LOG_LEVEL_INFO, "levitate - Start levitation control\r\n");
     Debug_Print(LOG_LEVEL_INFO, "stop_levitate - Stop levitation control\r\n");
     Debug_Print(LOG_LEVEL_INFO, "set_target x y z - Set levitation target position\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "calibrate <idx> - Calibrate sensor offset (remove magnets)");
+    Debug_Print(LOG_LEVEL_INFO, "read_cal <idx> - Read sensor with calibration applied");
+    Debug_Print(LOG_LEVEL_INFO, "read_raw <idx> - Read raw sensor data (with gain)");
+}
+void Show_Prompt(void) {
+    HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n> ", 4, 10);
 }
 
 // Функция для отображения статуса
@@ -248,24 +266,29 @@ void Show_System_Status(void) {
 }
 
 void Stream_Sensor_Data(void) {
-    if(!streaming_active) return;
+    if (!streaming_active) return;
     uint32_t current_time = HAL_GetTick();
-    if(current_time - last_stream_time < stream_interval_ms) {
+    if (current_time - last_stream_time < stream_interval_ms) {
         return;
     }
     last_stream_time = current_time;
 
-    float x, y, z;
-    // Используем Quick_Read_Sensor (или Read_Sensor) для одного датчика как пример
-    if(Quick_Read_Sensor(0)) { // Используем существующую функцию
-        x = sensors[0].magnetic_field[0];
-        y = sensors[0].magnetic_field[1];
-        z = sensors[0].magnetic_field[2];
-        // Формат: X,Y,Z\n
-        char buffer[64];
-        int len = snprintf(buffer, sizeof(buffer), "%.1f,%.1f,%.1f\n", x, y, z);
-        HAL_UART_Transmit(&huart2, (uint8_t*)buffer, len, 10);
+    char buffer[128];  // достаточно для 5*3 чисел + время
+    int len = snprintf(buffer, sizeof(buffer), "%lu", current_time);
+
+    for (int i = 0; i < ACTIVE_SENSORS; i++) {
+        if (sensors[i].is_connected) {
+            // Используем калиброванные значения
+            float x = sensors[i].magnetic_field[0] + sensors[i].offset[0];
+            float y = sensors[i].magnetic_field[1] + sensors[i].offset[1];
+            float z = sensors[i].magnetic_field[2] + sensors[i].offset[2];
+            len += snprintf(buffer + len, sizeof(buffer) - len, ",%.1f,%.1f,%.1f", x, y, z);
+        } else {
+            len += snprintf(buffer + len, sizeof(buffer) - len, ",0,0,0");
+        }
     }
+    strcat(buffer, "\n");
+    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 10);
 }
 
 // --- Заглушки для HID ---
@@ -381,6 +404,17 @@ int main(void)
 
     // Обработка команд
     Process_Console_Commands();
+    // Периодическое обновление датчиков
+        static uint32_t last_sensor_read = 0;
+        uint32_t now = HAL_GetTick();
+        if (now - last_sensor_read >= 20) {
+            for (int i = 0; i < ACTIVE_SENSORS; i++) {
+                if (sensors[i].is_connected) {
+                    Read_Sensor_With_Gain(i);
+                }
+            }
+            last_sensor_read = now;
+        }
 
     // Потоковая передача данных (если включена)
     Stream_Sensor_Data();
@@ -479,28 +513,20 @@ void Error_Handler(void) {
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART2) {
-        // Обработка символов
         if (RxChar == '\r' || RxChar == '\n') {
             if (command_index > 0) {
                 new_command = 1;
             }
-            // Переводим строку в терминале
             HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n", 2, 10);
-        }
-        else if (RxChar == '\b' || RxChar == 127) {   // Backspace
+        } else if (RxChar == '\b' || RxChar == 127) {
             if (command_index > 0) {
                 command_index--;
-                // Стираем символ
                 HAL_UART_Transmit(&huart2, (uint8_t*)"\b \b", 3, 10);
             }
-        }
-        else if (command_index < sizeof(command_buffer) - 1) {
+        } else if (command_index < sizeof(command_buffer) - 1) {
             command_buffer[command_index++] = RxChar;
-            // Эхо: отправляем символ обратно
-            HAL_UART_Transmit(&huart2, &RxChar, 1, 10);
+            HAL_UART_Transmit(&huart2, &RxChar, 1, 10); // эхо
         }
-
-        // Продолжаем приём
         HAL_UART_Receive_IT(&huart2, &RxChar, 1);
     }
 }
@@ -508,112 +534,155 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 void Process_Console_Commands(void) {
     if (!new_command) return;
     new_command = 0;
-    command_buffer[command_index] = '\0';  // Null-terminate
+
+    // Null-terminate буфер
+    command_buffer[command_index] = '\0';
     total_commands++;
 
-    // Удаляем возможные символы \r и \n в конце
-    int len = command_index;
-    while (len > 0 && (command_buffer[len-1] == '\r' || command_buffer[len-1] == '\n' || command_buffer[len-1] == ' ')) {
-        command_buffer[len-1] = '\0';
-        len--;
+    // Удаляем пробельные символы в начале и конце (включая \r, \n)
+    char *cmd_start = (char*)command_buffer;
+    while (*cmd_start == ' ' || *cmd_start == '\t' || *cmd_start == '\r' || *cmd_start == '\n')
+        cmd_start++;
+
+    int len = strlen(cmd_start);
+    while (len > 0 && (cmd_start[len-1] == ' ' || cmd_start[len-1] == '\t' ||
+                        cmd_start[len-1] == '\r' || cmd_start[len-1] == '\n')) {
+        cmd_start[--len] = '\0';
     }
 
-    char cmd[32];
-    // Используем sscanf для извлечения первой команды
-    if (sscanf((char*)command_buffer, "%31s", cmd) == 1) {
-
-        if (strcmp(cmd, CMD_HELP) == 0) {
-            Show_Help_Menu();
-        }
-        else if (strcmp(cmd, CMD_STATUS) == 0) {
-            Show_System_Status();
-        }
-        else if (strcmp(cmd, CMD_SENSOR) == 0) {
-            uint8_t idx;
-            if (sscanf((char*)command_buffer + strlen(cmd) + 1, "%hhu", &idx) == 1) {
-                if (idx < NUM_SENSORS) {
-                    uint8_t result = Read_Sensor(idx);
-                    Debug_Print(LOG_LEVEL_INFO, "Read_Sensor(%d) returned %d\r\n", idx, result);
-                    if (result) {
-                        Debug_Print(LOG_LEVEL_INFO,
-                            "Sensor %d: X=%.1f uT, Y=%.1f uT, Z=%.1f uT, T=%.1f C\r\n",
-                            idx,
-                            sensors[idx].magnetic_field[0],
-                            sensors[idx].magnetic_field[1],
-                            sensors[idx].magnetic_field[2],
-                            sensors[idx].temperature);
-                    } else {
-                        Debug_Print(LOG_LEVEL_ERROR, "Failed to read sensor %d, err_cnt=%d, fails=%lu/%lu\r\n",
-                            idx, sensors[idx].read_error_count,
-                            sensors[idx].failed_reads, sensors[idx].total_reads);
-                    }
-                } else {
-                    Debug_Print(LOG_LEVEL_ERROR, "Sensor index out of range (0-%d)\r\n", NUM_SENSORS-1);
-                }
-            } else {
-                Debug_Print(LOG_LEVEL_ERROR, "Usage: sensor <idx>\r\n");
-            }
-        }
-        else if (strcmp(cmd, CMD_CALIBRATE) == 0) {
-            Debug_Print(LOG_LEVEL_INFO, "Starting calibration (remove magnet first)...\r\n");
-            Calibrate_Sensors_Start(); // Используем функцию из sensor_mlx90393.c
-            system_state.calibration_done = 1;
-        }
-        else if (strcmp(cmd, CMD_SAVE_CAL) == 0) {
-            Save_Calibration_To_Flash(); // Вызов из sensor_mlx90393.c
-        }
-        else if (strcmp(cmd, CMD_LOAD_CAL) == 0) {
-            Load_Calibration_From_Flash(); // Вызов из sensor_mlx90393.c
-        }
-        else if (strcmp(cmd, CMD_START_STREAM) == 0) {
-            char* args_start = (char*)command_buffer + strlen(cmd);
-            while(*args_start == ' ') args_start++;
-
-            if(*args_start != '\0') {
-                int interval = atoi(args_start);
-                if(interval >= 10 && interval <= 1000) {
-                    stream_interval_ms = interval;
-                }
-            }
-
-            streaming_active = 1;
-            Debug_Print(LOG_LEVEL_INFO, "Streaming started (interval: %lu ms)\r\n", stream_interval_ms);
-        }
-        else if (strcmp(cmd, CMD_STOP_STREAM) == 0) {
-            streaming_active = 0;
-            Debug_Print(LOG_LEVEL_INFO, "Streaming stopped\r\n");
-        }
-        else if (strcmp(cmd, CMD_LEVITATE) == 0) {
-            Debug_Print(LOG_LEVEL_INFO, "Starting levitation control...\r\n");
-            Start_Levitation(); // Используем функцию из levitation_control.c
-        }
-        else if (strcmp(cmd, CMD_STOP_LEVITATE) == 0) {
-            Debug_Print(LOG_LEVEL_INFO, "Stopping levitation control...\r\n");
-            Stop_Levitation(); // Используем функцию из levitation_control.c
-        }
-        else if (strcmp(cmd, CMD_SET_TARGET) == 0) {
-            float x, y, z;
-            if (sscanf((char*)command_buffer + strlen(cmd) + 1, "%f %f %f", &x, &y, &z) == 3) {
-                Debug_Print(LOG_LEVEL_INFO, "Setting target position to X=%.2f, Y=%.2f, Z=%.2f\r\n", x, y, z);
-                Set_Levitation_Target(x, y, z); // Используем функцию из levitation_control.c
-            } else {
-                Debug_Print(LOG_LEVEL_ERROR, "Usage: set_target x y z\r\n");
-            }
-        }
-        else {
-            Debug_Print(LOG_LEVEL_ERROR, "Unknown command: '%s'\r\n", cmd);
-            Debug_Print(LOG_LEVEL_INFO, "Try 'help' for available commands\r\n");
-        }
-    } else {
-        Debug_Print(LOG_LEVEL_ERROR, "Failed to parse command\r\n");
+    // Если после очистки строка пуста – просто показываем приглашение
+    if (len == 0) {
+        command_index = 0;
+        memset(command_buffer, 0, sizeof(command_buffer));
+        Show_Prompt();
+        return;
     }
 
-    // Сброс буфера команды
+    // Разделяем команду и аргументы
+    char *cmd = strtok(cmd_start, " ");
+    if (cmd == NULL) {
+        command_index = 0;
+        memset(command_buffer, 0, sizeof(command_buffer));
+        Show_Prompt();
+        return;
+    }
+
+    // === Обработка команд ===
+    if (strcmp(cmd, "help") == 0) {
+        Show_Help_Menu();
+    }
+    else if (strcmp(cmd, "status") == 0) {
+        Show_System_Status();
+    }
+    else if (strcmp(cmd, "sensor") == 0) {
+        char *arg = strtok(NULL, " ");
+        if (!arg) {
+            Debug_Print(LOG_LEVEL_ERROR, "Usage: sensor <idx>\r\n");
+        } else {
+            int idx = atoi(arg);
+            if (idx < 0 || idx >= NUM_SENSORS) {
+                Debug_Print(LOG_LEVEL_ERROR, "Invalid sensor index\r\n");
+            } else {
+                Read_Sensor_Calibrated(idx);  // показывает калиброванные значения
+            }
+        }
+    }
+    else if (strcmp(cmd, "read_raw") == 0) {
+        char *arg = strtok(NULL, " ");
+        if (!arg) {
+            Debug_Print(LOG_LEVEL_ERROR, "Usage: read_raw <idx>\r\n");
+        } else {
+            int idx = atoi(arg);
+            if (idx < 0 || idx >= NUM_SENSORS) {
+                Debug_Print(LOG_LEVEL_ERROR, "Invalid sensor index\r\n");
+            } else {
+                Read_Sensor_With_Gain(idx);
+            }
+        }
+    }
+    else if (strcmp(cmd, "read_cal") == 0) {
+        char *arg = strtok(NULL, " ");
+        if (!arg) {
+            Debug_Print(LOG_LEVEL_ERROR, "Usage: read_cal <idx>\r\n");
+        } else {
+            int idx = atoi(arg);
+            if (idx < 0 || idx >= NUM_SENSORS) {
+                Debug_Print(LOG_LEVEL_ERROR, "Invalid sensor index\r\n");
+            } else {
+                Read_Sensor_Calibrated(idx);
+            }
+        }
+    }
+    else if (strcmp(cmd, "calibrate") == 0) {
+        char *arg = strtok(NULL, " ");
+        if (!arg) {
+            // калибруем все датчики
+            Debug_Print(LOG_LEVEL_INFO, "Calibrating all active sensors...\r\n");
+            for (int i = 0; i < ACTIVE_SENSORS; i++) {
+                if (sensors[i].is_connected) {
+                    Calibrate_Offset_Procedure(i);
+                }
+            }
+        } else {
+            int idx = atoi(arg);
+            if (idx < 0 || idx >= NUM_SENSORS) {
+                Debug_Print(LOG_LEVEL_ERROR, "Invalid sensor index\r\n");
+            } else {
+                Calibrate_Offset_Procedure(idx);
+            }
+        }
+    }
+    else if (strcmp(cmd, "save_cal") == 0) {
+        Save_Calibration_To_Flash();
+    }
+    else if (strcmp(cmd, "load_cal") == 0) {
+        Load_Calibration_From_Flash();
+    }
+    else if (strcmp(cmd, "start_stream") == 0) {
+        char *arg = strtok(NULL, " ");
+        if (arg) {
+            int interval = atoi(arg);
+            if (interval >= 10 && interval <= 1000) {
+                stream_interval_ms = interval;
+            }
+        }
+        streaming_active = 1;
+        Debug_Print(LOG_LEVEL_INFO, "Streaming started (interval: %lu ms)\r\n", stream_interval_ms);
+    }
+    else if (strcmp(cmd, "stop_stream") == 0) {
+        streaming_active = 0;
+        Debug_Print(LOG_LEVEL_INFO, "Streaming stopped\r\n");
+    }
+    else if (strcmp(cmd, "levitate") == 0) {
+        Start_Levitation();
+    }
+    else if (strcmp(cmd, "stop_levitate") == 0) {
+        Stop_Levitation();
+    }
+    else if (strcmp(cmd, "set_target") == 0) {
+        char *x_str = strtok(NULL, " ");
+        char *y_str = strtok(NULL, " ");
+        char *z_str = strtok(NULL, " ");
+        if (x_str && y_str && z_str) {
+            float x = atof(x_str);
+            float y = atof(y_str);
+            float z = atof(z_str);
+            Set_Levitation_Target(x, y, z);
+        } else {
+            Debug_Print(LOG_LEVEL_ERROR, "Usage: set_target x y z\r\n");
+        }
+    }
+    else {
+        Debug_Print(LOG_LEVEL_ERROR, "Unknown command: '%s'\r\n", cmd);
+        Debug_Print(LOG_LEVEL_INFO, "Try 'help' for available commands\r\n");
+    }
+
+    // Сброс буфера и вывод приглашения
     command_index = 0;
     memset(command_buffer, 0, sizeof(command_buffer));
-    // Показать приглашение для следующей команды
-    HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n> ", 4, 10);
+    Show_Prompt();
 }
+
 
 /* USER CODE END 4 */
 
