@@ -39,8 +39,8 @@ Core/Src/coil_driver.o: ../Core/Src/coil_driver.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h \
- ../Core/Inc/config.h ../Core/Inc/debug_console.h ../Core/Inc/config.h \
- ../Core/Inc/main.h ../Core/Inc/tim.h ../Core/Inc/gpio.h
+ ../Core/Inc/config.h ../Core/Inc/config.h ../Core/Inc/main.h \
+ ../Core/Inc/tim.h ../Core/Inc/gpio.h ../Core/Inc/debug_console.h
 ../Core/Inc/coil_driver.h:
 ../Core/Inc/main.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
@@ -83,8 +83,8 @@ Core/Src/coil_driver.o: ../Core/Src/coil_driver.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h:
 ../Core/Inc/config.h:
-../Core/Inc/debug_console.h:
 ../Core/Inc/config.h:
 ../Core/Inc/main.h:
 ../Core/Inc/tim.h:
 ../Core/Inc/gpio.h:
+../Core/Inc/debug_console.h:

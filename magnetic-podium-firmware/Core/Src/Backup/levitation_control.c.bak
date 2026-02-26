@@ -1,10 +1,35 @@
 #include "levitation_control.h"
 #include "config.h"
+#include "main.h"
 #include "coil_driver.h"
-#include "sensor_mlx90393.h"
+#include "sensor_mlx90393.h" // Зависит от config.h
 #include "debug_console.h"
 #include <math.h>
 #include <string.h>
+#include <stdio.h> // Для snprintf
+#include "arm_math.h"
+
+extern MLX90393_t sensors[NUM_SENSORS]; // <-- Объявление extern в .c файле
+
+#define MU0_4PI 1e-7f  // mu0/(4pi) в СИ
+
+// Магнитный момент шара (нужно подобрать экспериментально)
+static const float ball_moment[3] = {0.0f, 0.0f, 1.0f}; // предположим, направлен вверх
+
+// --- ОПРЕДЕЛЕНИЕ ГЛОБАЛЬНЫХ ПЕРЕМЕННЫХ ---
+SystemState_t system_state = {
+    .coils_enabled = 0,
+    .sensors_enabled = 0,
+    .monitoring_active = 0,
+    .calibration_done = 0,
+    .levitation_active = 0,
+    .system_uptime_ms = 0,
+    .cpu_usage_percent = 0.0f,
+    .ball_position = {0.0f, 0.0f, 0.0f}
+};
+
+OperationMode_t current_mode = MODE_IDLE; // Инициализируем начальным режимом
+
 
 // Определяем глобальные переменные
 PID_Controller_t pid_controller = {
@@ -44,6 +69,190 @@ void Initialize_Coil_Geometry(void) {
             coil_geometry[i].orientation[2] * coil_geometry[i].orientation[2]
         );
 
+        static void Compute_ForceTorque(uint8_t coil_idx, const float ball_pos[3],
+                                        const float ball_moment[3],
+                                        float force[3], float torque[3])
+        {
+            // Координаты катушки (из coil_geometry)
+            float r_c[3] = {coil_geometry[coil_idx].x,
+                            coil_geometry[coil_idx].y,
+                            coil_geometry[coil_idx].z};
+            // Вектор от катушки к шару
+            float r[3] = {ball_pos[0] - r_c[0],
+                          ball_pos[1] - r_c[1],
+                          ball_pos[2] - r_c[2]};
+            float r2 = r[0]*r[0] + r[1]*r[1] + r[2]*r[2];
+            float r_norm = sqrtf(r2);
+            if (r_norm < 1e-6f) {
+                force[0] = force[1] = force[2] = 0;
+                torque[0] = torque[1] = torque[2] = 0;
+                return;
+            }
+
+            float r5 = r2 * r2 * r_norm;
+
+            // Скалярные произведения
+            float Mr = ball_moment[0]*r[0] + ball_moment[1]*r[1] + ball_moment[2]*r[2];
+            float mr = coil_geometry[coil_idx].orientation[0]*r[0] +
+                       coil_geometry[coil_idx].orientation[1]*r[1] +
+                       coil_geometry[coil_idx].orientation[2]*r[2];
+            float Mm = ball_moment[0]*coil_geometry[coil_idx].orientation[0] +
+                       ball_moment[1]*coil_geometry[coil_idx].orientation[1] +
+                       ball_moment[2]*coil_geometry[coil_idx].orientation[2];
+
+            // Сила (без коэффициента mu0/(4pi) – его добавим позже)
+            float factor = 3.0f / r5; // mu0/(4pi) учтём отдельно
+            for (int i = 0; i < 3; i++) {
+                force[i] = factor * ( Mr * coil_geometry[coil_idx].orientation[i] +
+                                      mr * ball_moment[i] +
+                                      Mm * r[i] -
+                                      5.0f * Mr * mr * r[i] / r2 );
+            }
+
+            // Поле катушки в точке шара (для момента)
+            float B[3];
+            float r3 = r2 * r_norm;
+            factor = 1.0f / r3; // mu0/(4pi) потом
+            float coeff = 3.0f * mr / r2;
+            for (int i = 0; i < 3; i++) {
+                B[i] = factor * (coeff * r[i] - coil_geometry[coil_idx].orientation[i]);
+            }
+
+            // Момент силы T = M × B
+            torque[0] = ball_moment[1]*B[2] - ball_moment[2]*B[1];
+            torque[1] = ball_moment[2]*B[0] - ball_moment[0]*B[2];
+            torque[2] = ball_moment[0]*B[1] - ball_moment[1]*B[0];
+
+            // Умножим на mu0/(4pi) и на знак? (в формулах уже учтено)
+            float mu0_4pi = 1e-7f; // можно подобрать калибровкой
+            for (int i = 0; i < 3; i++) {
+                force[i] *= mu0_4pi;
+                torque[i] *= mu0_4pi;
+            }
+        }
+
+        // Заполнение матрицы A (6x12) для текущего положения
+        static void Build_Matrix_A(const float ball_pos[3], const float ball_moment[3],
+                                  float A[6][12])
+        {
+            for (int j = 0; j < NUM_COILS; j++) {
+                float f[3], t[3];
+                Compute_ForceTorque(j, ball_pos, ball_moment, f, t);
+                // Заполняем столбец j: первые 3 строки – сила, следующие 3 – момент
+                for (int i = 0; i < 3; i++) {
+                    A[i][j] = f[i];
+                    A[i+3][j] = t[i];
+                }
+            }
+        }
+
+        // Решение задачи: I = pinv(A) * u
+        static void Solve_Currents(const float A[6][12], const float u[6],
+                                  float I[12], float lambda)
+        {
+            // Вычисляем C = A * A^T  (6x6)
+            float C[6][6] = {0};
+            for (int i = 0; i < 6; i++) {
+                for (int j = 0; j < 6; j++) {
+                    float sum = 0;
+                    for (int k = 0; k < NUM_COILS; k++) {
+                        sum += A[i][k] * A[j][k];
+                    }
+                    C[i][j] = sum;
+                }
+            }
+
+            // Добавляем регуляризацию lambda^2 * I
+            for (int i = 0; i < 6; i++) {
+                C[i][i] += lambda * lambda;
+            }
+
+            // Обращаем матрицу C (6x6) методом Гаусса-Жордана или через arm_mat_inverse
+            float C_inv[6][6];
+            if (!InvertMatrix_6x6(C, C_inv)) {
+                // если не удалось, обнуляем токи
+                memset(I, 0, NUM_COILS * sizeof(float));
+                return;
+            }
+
+            // Вычисляем I = A^T * C_inv * u
+            // Сначала tmp = C_inv * u (6x1)
+            float tmp[6];
+            for (int i = 0; i < 6; i++) {
+                tmp[i] = 0;
+                for (int j = 0; j < 6; j++) {
+                    tmp[i] += C_inv[i][j] * u[j];
+                }
+            }
+
+            // I = A^T * tmp
+            for (int k = 0; k < NUM_COILS; k++) {
+                I[k] = 0;
+                for (int i = 0; i < 6; i++) {
+                    I[k] += A[i][k] * tmp[i];
+                }
+            }
+        }
+
+        // Функция обращения матрицы 6x6 (простая реализация)
+        static int InvertMatrix_6x6(const float A[6][6], float inv[6][6])
+        {
+            // Расширенная матрица [A | I]
+            float aug[6][12];
+            for (int i = 0; i < 6; i++) {
+                for (int j = 0; j < 6; j++) {
+                    aug[i][j] = A[i][j];
+                    aug[i][j+6] = (i == j) ? 1.0f : 0.0f;
+                }
+            }
+
+            // Прямой ход Гаусса
+            for (int col = 0; col < 6; col++) {
+                // Поиск главного элемента
+                int pivot = col;
+                float max_val = fabsf(aug[col][col]);
+                for (int row = col+1; row < 6; row++) {
+                    if (fabsf(aug[row][col]) > max_val) {
+                        max_val = fabsf(aug[row][col]);
+                        pivot = row;
+                    }
+                }
+                if (max_val < 1e-6f) return 0; // матрица вырождена
+
+                // Обмен строк
+                if (pivot != col) {
+                    for (int j = 0; j < 12; j++) {
+                        float tmp = aug[col][j];
+                        aug[col][j] = aug[pivot][j];
+                        aug[pivot][j] = tmp;
+                    }
+                }
+
+                // Нормализация строки
+                float div = aug[col][col];
+                for (int j = 0; j < 12; j++) {
+                    aug[col][j] /= div;
+                }
+
+                // Обнуление остальных строк
+                for (int row = 0; row < 6; row++) {
+                    if (row != col) {
+                        float factor = aug[row][col];
+                        for (int j = 0; j < 12; j++) {
+                            aug[row][j] -= factor * aug[col][j];
+                        }
+                    }
+                }
+            }
+
+            // Извлекаем обратную матрицу из правой половины
+            for (int i = 0; i < 6; i++) {
+                for (int j = 0; j < 6; j++) {
+                    inv[i][j] = aug[i][j+6];
+                }
+            }
+            return 1;
+        }
         coil_geometry[i].orientation[0] /= length;
         coil_geometry[i].orientation[1] /= length;
         coil_geometry[i].orientation[2] /= length;
@@ -148,136 +357,152 @@ void Calculate_Ball_Position(Position3D_t* position) {
     position->timestamp = HAL_GetTick();
 }
 
-void Update_PID_Controller(float dt) {
+void Update_PID_Controller(float dt)
+{
+    // Получаем позицию от MLX
     Position3D_t ball_pos;
     Calculate_Ball_Position(&ball_pos);
-
-    if(ball_pos.confidence < 0.3f) {
-        // Недостаточно данных для управления
-        return;
-    }
-
-    // Обновляем системное состояние
     system_state.ball_position[0] = ball_pos.x;
     system_state.ball_position[1] = ball_pos.y;
     system_state.ball_position[2] = ball_pos.z;
 
-    // Рассчитываем ошибку
-    float error[3];
-    error[0] = pid_controller.setpoint[0] - ball_pos.x;
-    error[1] = pid_controller.setpoint[1] - ball_pos.y;
-    error[2] = pid_controller.setpoint[2] - ball_pos.z;
+    // Получаем данные IMU (глобальная переменная last_imu_data)
+    // Защищаем от изменения во время копирования (можно отключить прерывания на время)
+    IMU_Data_t imu;
+    __disable_irq();
+    memcpy(&imu, (void*)&last_imu_data, sizeof(IMU_Data_t));
+    __enable_irq();
 
-    // Пропорциональная составляющая
-    pid_controller.output[0] = pid_controller.Kp[0] * error[0];
-    pid_controller.output[1] = pid_controller.Kp[1] * error[1];
-    pid_controller.output[2] = pid_controller.Kp[2] * error[2];
+    // Переводим в физические единицы
+    float roll  = imu.roll  * 0.001f;      // радианы
+    float pitch = imu.pitch * 0.001f;
+    float yaw   = imu.yaw   * 0.001f;
 
-    // Интегральная составляющая (с анти-виндъяпом)
-    for(int i = 0; i < 3; i++) {
-        pid_controller.integral[i] += error[i] * dt;
+    float gyro_x = imu.gyro_x * 0.001f * (M_PI / 180.0f); // mdps -> rad/s
+    float gyro_y = imu.gyro_y * 0.001f * (M_PI / 180.0f);
+    float gyro_z = imu.gyro_z * 0.001f * (M_PI / 180.0f);
 
-        // Ограничение интегральной составляющей
-        if(pid_controller.integral[i] > pid_controller.max_integral) {
-            pid_controller.integral[i] = pid_controller.max_integral;
-        } else if(pid_controller.integral[i] < -pid_controller.max_integral) {
-            pid_controller.integral[i] = -pid_controller.max_integral;
+    // --- Ошибка по позиции ---
+    float error_pos[3] = {
+        pid_controller.setpoint_pos[0] - ball_pos.x,
+        pid_controller.setpoint_pos[1] - ball_pos.y,
+        pid_controller.setpoint_pos[2] - ball_pos.z
+    };
+
+    for (int i = 0; i < 3; i++) {
+        // Пропорциональная
+        pid_controller.output_pos[i] = pid_controller.Kp_pos[i] * error_pos[i];
+
+        // Интегральная (с антивиндъяпом)
+        pid_controller.integral_pos[i] += error_pos[i] * dt;
+        if (pid_controller.integral_pos[i] > pid_controller.max_integral)
+            pid_controller.integral_pos[i] = pid_controller.max_integral;
+        if (pid_controller.integral_pos[i] < -pid_controller.max_integral)
+            pid_controller.integral_pos[i] = -pid_controller.max_integral;
+        pid_controller.output_pos[i] += pid_controller.Ki_pos[i] * pid_controller.integral_pos[i];
+
+        // Дифференциальная (по ошибке)
+        if (dt > 0.001f) {
+            float derivative = (error_pos[i] - pid_controller.prev_error_pos[i]) / dt;
+            pid_controller.output_pos[i] += pid_controller.Kd_pos[i] * derivative;
+            pid_controller.prev_error_pos[i] = error_pos[i];
         }
-
-        pid_controller.output[i] += pid_controller.Ki[i] * pid_controller.integral[i];
-    }
-
-    // Дифференциальная составляющая
-    if(dt > 0.001f) {
-        for(int i = 0; i < 3; i++) {
-            float derivative = (error[i] - pid_controller.prev_error[i]) / dt;
-            pid_controller.output[i] += pid_controller.Kd[i] * derivative;
-            pid_controller.prev_error[i] = error[i];
-        }
-    }
-
-    // Ограничение выходного сигнала
-    for(int i = 0; i < 3; i++) {
-        if(pid_controller.output[i] > pid_controller.max_output) {
-            pid_controller.output[i] = pid_controller.max_output;
-        } else if(pid_controller.output[i] < -pid_controller.max_output) {
-            pid_controller.output[i] = -pid_controller.max_output;
-        }
-    }
-}
-
-void Calculate_Coil_Forces(float fx, float fy, float fz, float* coil_powers) {
-    // Распределяем силы по катушкам на основе их ориентации
-
-    for(int i = 0; i < NUM_COILS; i++) {
-        // Проекция силы на ориентацию катушки
-        float projection =
-            fx * coil_geometry[i].orientation[0] +
-            fy * coil_geometry[i].orientation[1] +
-            fz * coil_geometry[i].orientation[2];
-
-        // Также учитываем расстояние до центра
-        float distance = sqrtf(
-            coil_geometry[i].x * coil_geometry[i].x +
-            coil_geometry[i].y * coil_geometry[i].y +
-            coil_geometry[i].z * coil_geometry[i].z
-        );
-
-        // Коэффициент эффективности (катушки ближе к центру более эффективны)
-        float efficiency = 1.0f / (distance + 1.0f);
-
-        coil_powers[i] = projection * efficiency * 2.0f; // Усиливаем
 
         // Ограничение
-        if(coil_powers[i] > 1.0f) coil_powers[i] = 1.0f;
-        if(coil_powers[i] < -1.0f) coil_powers[i] = -1.0f;
+        if (pid_controller.output_pos[i] > pid_controller.max_output)
+            pid_controller.output_pos[i] = pid_controller.max_output;
+        if (pid_controller.output_pos[i] < -pid_controller.max_output)
+            pid_controller.output_pos[i] = -pid_controller.max_output;
     }
 
-    // Нормализуем, чтобы суммарная мощность не превышала лимит
-    float max_power = 0.0f;
-    for(int i = 0; i < NUM_COILS; i++) {
-        if(fabsf(coil_powers[i]) > max_power) {
-            max_power = fabsf(coil_powers[i]);
-        }
-    }
+    // --- Ошибка по ориентации ---
+    float error_ori[3] = {
+        pid_controller.setpoint_ori[0] - roll,
+        pid_controller.setpoint_ori[1] - pitch,
+        pid_controller.setpoint_ori[2] - yaw
+    };
 
-    if(max_power > 0.8f) {
-        float scale = 0.8f / max_power;
-        for(int i = 0; i < NUM_COILS; i++) {
-            coil_powers[i] *= scale;
-        }
+    for (int i = 0; i < 3; i++) {
+        pid_controller.output_ori[i] = pid_controller.Kp_ori[i] * error_ori[i];
+
+        // Интегральная
+        pid_controller.integral_ori[i] += error_ori[i] * dt;
+        if (pid_controller.integral_ori[i] > pid_controller.max_integral)
+            pid_controller.integral_ori[i] = pid_controller.max_integral;
+        if (pid_controller.integral_ori[i] < -pid_controller.max_integral)
+            pid_controller.integral_ori[i] = -pid_controller.max_integral;
+        pid_controller.output_ori[i] += pid_controller.Ki_ori[i] * pid_controller.integral_ori[i];
+
+        // Дифференциальная составляющая – используем угловую скорость (демпфирование)
+        float angular_velocity = 0;
+        if (i == 0) angular_velocity = gyro_x;
+        else if (i == 1) angular_velocity = gyro_y;
+        else angular_velocity = gyro_z;
+        pid_controller.output_ori[i] += pid_controller.Kd_ori[i] * angular_velocity;
+
+        // Ограничение
+        if (pid_controller.output_ori[i] > pid_controller.max_output)
+            pid_controller.output_ori[i] = pid_controller.max_output;
+        if (pid_controller.output_ori[i] < -pid_controller.max_output)
+            pid_controller.output_ori[i] = -pid_controller.max_output;
+
+        pid_controller.prev_error_ori[i] = error_ori[i];
     }
 }
 
-void Apply_Levitation_Control(void) {
+void Calculate_Coil_Forces(float fx, float fy, float fz,
+                           float tx, float ty, float tz,
+                           float* coil_powers)
+{
+    // Текущая позиция шара (из system_state или пересчитать)
+    float ball_pos[3] = {system_state.ball_position[0],
+                          system_state.ball_position[1],
+                          system_state.ball_position[2]};
+
+    // Магнитный момент шара (предполагаем направление вдоль вертикали,
+    // но можно уточнить по ориентации из IMU)
+    float ball_moment[3];
+    // Используем данные IMU для ориентации момента
+    // Например, из кватерниона или углов
+    // Пока считаем постоянным
+    ball_moment[0] = 0; ball_moment[1] = 0; ball_moment[2] = 1.0f;
+
+    float A[6][12];
+    Build_Matrix_A(ball_pos, ball_moment, A);
+
+    // Вектор желаемых усилий u = [fx, fy, fz, tx, ty, tz]
+    float u[6] = {fx, fy, fz, tx, ty, tz};
+
+    float I[12];
+    Solve_Currents(A, u, I, 0.1f); // lambda = 0.1
+
+    // Копируем в выходной массив
+    for (int i = 0; i < NUM_COILS; i++) {
+        coil_powers[i] = I[i];
+    }
+}
+
+void Apply_Levitation_Control(void)
+{
     static uint32_t last_time = 0;
     uint32_t current_time = HAL_GetTick();
+    if (last_time == 0) { last_time = current_time; return; }
+    float dt = (current_time - last_time) / 1000.0f;
+    if (dt < 0.001f) return;
 
-    if(last_time == 0) {
-        last_time = current_time;
-        return;
-    }
+    // Получаем силы и моменты от ПИД (уже обновлённого с IMU)
+    float fx = pid_controller.output_pos[0] * 10.0f;
+    float fy = pid_controller.output_pos[1] * 10.0f;
+    float fz = pid_controller.output_pos[2] * 10.0f + 9.8f; // компенсация гравитации
 
-    float dt = (current_time - last_time) / 1000.0f;  // в секундах
-    if(dt < 0.001f) return;  // Слишком маленький интервал
+    float tx = pid_controller.output_ori[0] * 1.0f; // масштаб моментов
+    float ty = pid_controller.output_ori[1] * 1.0f;
+    float tz = pid_controller.output_ori[2] * 1.0f;
 
-    // Обновляем ПИД контроллер
-    Update_PID_Controller(dt);
-
-    // Преобразуем выход ПИД в силы
-    float fx = pid_controller.output[0] * 10.0f;  // Масштабируем
-    float fy = pid_controller.output[1] * 10.0f;
-    float fz = pid_controller.output[2] * 10.0f;
-
-    // Добавляем гравитационную компенсацию (примерно 9.8 м/с²)
-    fz += 9.8f;
-
-    // Рассчитываем мощности катушек
     float coil_powers[NUM_COILS];
-    Calculate_Coil_Forces(fx, fy, fz, coil_powers);
+    Calculate_Coil_Forces(fx, fy, fz, tx, ty, tz, coil_powers);
 
-    // Применяем мощности к катушкам
-    for(int i = 0; i < NUM_COILS; i++) {
+    for (int i = 0; i < NUM_COILS; i++) {
         Set_Coil_Power(i, coil_powers[i]);
     }
 
@@ -341,4 +566,182 @@ void Get_Levitation_Status(char* buffer, uint16_t buffer_size) {
              pos.x, pos.y, pos.z, pos.confidence,
              pid_controller.setpoint[0], pid_controller.setpoint[1], pid_controller.setpoint[2],
              pid_controller.output[0], pid_controller.output[1], pid_controller.output[2]);
+}
+#include <math.h>
+
+#define MU0_4PI 1e-7f  // μ0/(4π) в системе СИ
+
+/**
+ * Вычисляет магнитное поле диполя с моментом m[3], расположенного в p[3],
+ * в точке s[3]. Результат в B[3].
+ */
+void DipoleField(const float p[3], const float m[3], const float s[3], float B[3])
+{
+    float r[3] = { s[0] - p[0], s[1] - p[1], s[2] - p[2] };
+    float r2 = r[0]*r[0] + r[1]*r[1] + r[2]*r[2];
+    float r_norm = sqrtf(r2);
+    if (r_norm < 1e-6f) {
+        B[0] = B[1] = B[2] = 0;
+        return;
+    }
+
+    float r3 = r2 * r_norm;
+    float r5 = r3 * r2;
+
+    float mr = m[0]*r[0] + m[1]*r[1] + m[2]*r[2];
+    float factor1 = 3.0f * mr / r5;   // для первой части
+    float factor2 = 1.0f / r3;        // для второй
+
+    B[0] = MU0_4PI * (factor1 * r[0] - factor2 * m[0]);
+    B[1] = MU0_4PI * (factor1 * r[1] - factor2 * m[1]);
+    B[2] = MU0_4PI * (factor1 * r[2] - factor2 * m[2]);
+}
+/**
+ * Вычисляет вектор невязки (разность между моделью и измерением)
+ * для текущей позиции p и ориентации (через m).
+ * residual – массив из 15 чисел (сначала x,y,z для датчика 0, потом датчик 1 и т.д.)
+ */
+void ComputeResidual(const float p[3], const float m[3],
+                     const float ball_meas[5][3],   // B_ball на каждом датчике
+                     float residual[15])
+{
+    for (int i = 0; i < 5; i++) {
+        float B_model[3];
+        DipoleField(p, m, sensor_coords[i], B_model);
+        residual[3*i + 0] = B_model[0] - ball_meas[i][0];
+        residual[3*i + 1] = B_model[1] - ball_meas[i][1];
+        residual[3*i + 2] = B_model[2] - ball_meas[i][2];
+    }
+}
+
+/**
+ * Численное вычисление якобиана (15×3) методом конечных разностей.
+ * Заполняет матрицу J (15 строк, 3 столбца).
+ */
+void ComputeJacobian(const float p[3], const float m[3],
+                     const float ball_meas[5][3],
+                     float J[15][3])
+{
+    const float delta = 1e-4f; // шаг дифференцирования (1 мм = 0.1 см, подберите)
+    float residual0[15];
+    ComputeResidual(p, m, ball_meas, residual0);
+
+    for (int j = 0; j < 3; j++) {
+        float p_plus[3] = { p[0], p[1], p[2] };
+        p_plus[j] += delta;
+        float res_plus[15];
+        ComputeResidual(p_plus, m, ball_meas, res_plus);
+
+        for (int i = 0; i < 15; i++) {
+            J[i][j] = (res_plus[i] - residual0[i]) / delta;
+        }
+    }
+}
+/**
+ * Одна итерация Гаусса–Ньютона.
+ * Возвращает новую позицию.
+ */
+void GaussNewtonIteration(float p[3], const float m[3],
+                          const float ball_meas[5][3])
+{
+    float J[15][3];
+    float r[15];
+
+    ComputeResidual(p, m, ball_meas, r);
+    ComputeJacobian(p, m, ball_meas, J);
+
+    // Вычисляем JᵀJ (3×3) и Jᵀr (3×1)
+    float JTJ[3][3] = {{0}};
+    float JTr[3] = {0};
+
+    for (int i = 0; i < 15; i++) {
+        for (int k = 0; k < 3; k++) {
+            JTr[k] += J[i][k] * r[i];
+            for (int l = 0; l < 3; l++) {
+                JTJ[k][l] += J[i][k] * J[i][l];
+            }
+        }
+    }
+
+    // Решаем систему JTJ * Δp = -JTr
+    // Используем метод Крамера для 3x3 (можно и Гаусса)
+    float det = JTJ[0][0] * (JTJ[1][1]*JTJ[2][2] - JTJ[1][2]*JTJ[2][1])
+              - JTJ[0][1] * (JTJ[1][0]*JTJ[2][2] - JTJ[1][2]*JTJ[2][0])
+              + JTJ[0][2] * (JTJ[1][0]*JTJ[2][1] - JTJ[1][1]*JTJ[2][0]);
+
+    if (fabsf(det) < 1e-12f) return; // вырождено
+
+    float invJTJ[3][3];
+    invJTJ[0][0] = (JTJ[1][1]*JTJ[2][2] - JTJ[1][2]*JTJ[2][1]) / det;
+    invJTJ[0][1] = (JTJ[0][2]*JTJ[2][1] - JTJ[0][1]*JTJ[2][2]) / det;
+    invJTJ[0][2] = (JTJ[0][1]*JTJ[1][2] - JTJ[0][2]*JTJ[1][1]) / det;
+    invJTJ[1][0] = (JTJ[1][2]*JTJ[2][0] - JTJ[1][0]*JTJ[2][2]) / det;
+    invJTJ[1][1] = (JTJ[0][0]*JTJ[2][2] - JTJ[0][2]*JTJ[2][0]) / det;
+    invJTJ[1][2] = (JTJ[0][2]*JTJ[1][0] - JTJ[0][0]*JTJ[1][2]) / det;
+    invJTJ[2][0] = (JTJ[1][0]*JTJ[2][1] - JTJ[1][1]*JTJ[2][0]) / det;
+    invJTJ[2][1] = (JTJ[0][1]*JTJ[2][0] - JTJ[0][0]*JTJ[2][1]) / det;
+    invJTJ[2][2] = (JTJ[0][0]*JTJ[1][1] - JTJ[0][1]*JTJ[1][0]) / det;
+
+    // Δp = -inv(JTJ) * JTr
+    float dp[3];
+    for (int k = 0; k < 3; k++) {
+        dp[k] = 0;
+        for (int l = 0; l < 3; l++) {
+            dp[k] -= invJTJ[k][l] * JTr[l];
+        }
+    }
+
+    // Обновляем позицию
+    p[0] += dp[0];
+    p[1] += dp[1];
+    p[2] += dp[2];
+}
+void EstimateBallPosition(float ball_pos[3], const float ball_orient[4] /* кватернион */)
+{
+    // 1. Получаем сырые данные с датчиков (B_meas[i][3])
+    // 2. Вычитаем поле катушек (требуется расчёт B_coil по текущим токам)
+    float B_ball[5][3];
+    for (int i = 0; i < 5; i++) {
+        // B_coil[i] – поле катушек в точке датчика i (нужна функция)
+        // пока заглушка:
+        float B_coil[3] = {0};
+        B_ball[i][0] = sensors[i].magnetic_field[0] - B_coil[0];
+        B_ball[i][1] = sensors[i].magnetic_field[1] - B_coil[1];
+        B_ball[i][2] = sensors[i].magnetic_field[2] - B_coil[2];
+    }
+
+    // 3. Преобразуем ориентацию в вектор момента m
+    float m[3];
+    // для простоты считаем момент постоянным и направленным вертикально
+    // но лучше использовать IMU: m = rotate(quat, m0)
+    m[0] = 0; m[1] = 0; m[2] = 1.0f; // подставьте реальное значение момента
+
+    // 4. Начальное приближение – предыдущая позиция (хранится в system_state)
+    float p[3] = { ball_pos[0], ball_pos[1], ball_pos[2] };
+
+    // 5. Выполняем несколько итераций (например, 5)
+    for (int iter = 0; iter < 5; iter++) {
+        GaussNewtonIteration(p, m, B_ball);
+    }
+
+    // 6. Сохраняем результат
+    ball_pos[0] = p[0];
+    ball_pos[1] = p[1];
+    ball_pos[2] = p[2];
+}
+static uint8_t IsBallReleased(void)
+{
+    // Получаем текущую позицию и скорость
+    float vel_x = (system_state.ball_position[0] - prev_pos[0]) / dt;
+    float vel_y = (system_state.ball_position[1] - prev_pos[1]) / dt;
+    float vel_z = (system_state.ball_position[2] - prev_pos[2]) / dt;
+    float speed = sqrtf(vel_x*vel_x + vel_y*vel_y + vel_z*vel_z);
+    float dist_to_home = sqrtf( (system_state.ball_position[0])*(system_state.ball_position[0]) +
+                                 (system_state.ball_position[1])*(system_state.ball_position[1]) +
+                                 (system_state.ball_position[2]-HOME_Z)*(system_state.ball_position[2]-HOME_Z) );
+    // Условие: близко к дому и маленькая скорость
+    if (dist_to_home < RELEASE_DIST_THRESH && speed < RELEASE_SPEED_THRESH) {
+        return 1;
+    }
+    return 0;
 }

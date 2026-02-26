@@ -60,6 +60,8 @@ extern DMA_HandleTypeDef hdma_spi1_rx;
 extern DMA_HandleTypeDef hdma_spi1_tx;
 extern SPI_HandleTypeDef hspi1;
 extern UART_HandleTypeDef huart2;
+extern UART_HandleTypeDef huart3;
+extern Process_IMU_Byte;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -256,6 +258,23 @@ void USART2_IRQHandler(void)
   /* USER CODE BEGIN USART2_IRQn 1 */
 
   /* USER CODE END USART2_IRQn 1 */
+}
+
+/**
+  * @brief This function handles USART3 global interrupt.
+  */
+void USART3_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART3_IRQn 0 */
+  if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_RXNE) != RESET) {
+      uint8_t byte = (uint8_t)(huart3.Instance->RDR & 0xFF);
+      Process_IMU_Byte(byte);
+  }
+  /* USER CODE END USART3_IRQn 0 */
+  HAL_UART_IRQHandler(&huart3);
+  /* USER CODE BEGIN USART3_IRQn 1 */
+
+  /* USER CODE END USART3_IRQn 1 */
 }
 
 /**

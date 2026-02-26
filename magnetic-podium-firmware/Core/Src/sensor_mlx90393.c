@@ -316,6 +316,20 @@ uint8_t Test_Sensor_Connection(uint8_t sensor_idx) {
     if (sensor_idx >= NUM_SENSORS) return 0;
     return sensors[sensor_idx].is_connected;
 }
+/**
+  * @brief  Вычисляет модуль вектора магнитного поля по данным датчика.
+  * @param  sensor_idx Индекс датчика (0..NUM_SENSORS-1).
+  * @retval Модуль поля в микротеслах (µT) или 0, если датчик недоступен.
+  */
+float Calculate_Magnetic_Field_Strength(uint8_t sensor_idx)
+{
+    if (sensor_idx >= NUM_SENSORS) return 0.0f;
+    MLX90393_t *s = &sensors[sensor_idx];
+    float x = s->magnetic_field[0];
+    float y = s->magnetic_field[1];
+    float z = s->magnetic_field[2];
+    return sqrtf(x*x + y*y + z*z);
+}
 
 void Get_Sensor_Stats_String(char *buffer, uint16_t buffer_size) {
     int connected = 0;

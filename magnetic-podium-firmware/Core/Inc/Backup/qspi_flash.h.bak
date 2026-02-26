@@ -11,7 +11,7 @@
 // --- ПЕРЕМЕСТИТЕ ОПРЕДЕЛЕНИЯ КАЛИБРОВКИ СЮДА ---
 #define CALIBRATION_DATA_SIGNATURE 0xDEADBEEF
 #define CALIBRATION_DATA_VERSION 1
-#define CALIBRATION_DATA_ADDR     (0x00000000UL) // Начало флешки (измени при необходимости)
+#define CALIBRATION_DATA_ADDR     (0x00000000UL)
 
 
 

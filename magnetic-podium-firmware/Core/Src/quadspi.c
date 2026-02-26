@@ -37,15 +37,15 @@ void MX_QUADSPI_Init(void)
   /* USER CODE BEGIN QUADSPI_Init 1 */
 
   /* USER CODE END QUADSPI_Init 1 */
-	 hqspi.Instance = QUADSPI;
-	 hqspi.Init.ClockPrescaler = 8;           // было 2 — слишком быстро!
-	 hqspi.Init.FifoThreshold = 1;
-	 hqspi.Init.SampleShifting = QSPI_SAMPLE_SHIFTING_HALFCYCLE; // лучше для высоких частот
-	 hqspi.Init.FlashSize = 23;               // для 8MB (2^(23+1)=16MB? обычно 23 для 8MB)
-	 hqspi.Init.ChipSelectHighTime = QSPI_CS_HIGH_TIME_5_CYCLE; // больше времени на CS
-	 hqspi.Init.ClockMode = QSPI_CLOCK_MODE_0;
-	 hqspi.Init.FlashID = QSPI_FLASH_ID_1;
-	 hqspi.Init.DualFlash = QSPI_DUALFLASH_DISABLE;
+  hqspi.Instance = QUADSPI;
+  hqspi.Init.ClockPrescaler = 8;
+  hqspi.Init.FifoThreshold = 1;
+  hqspi.Init.SampleShifting = QSPI_SAMPLE_SHIFTING_NONE;
+  hqspi.Init.FlashSize = 23;
+  hqspi.Init.ChipSelectHighTime = QSPI_CS_HIGH_TIME_1_CYCLE;
+  hqspi.Init.ClockMode = QSPI_CLOCK_MODE_0;
+  hqspi.Init.FlashID = QSPI_FLASH_ID_1;
+  hqspi.Init.DualFlash = QSPI_DUALFLASH_DISABLE;
   if (HAL_QSPI_Init(&hqspi) != HAL_OK)
   {
     Error_Handler();

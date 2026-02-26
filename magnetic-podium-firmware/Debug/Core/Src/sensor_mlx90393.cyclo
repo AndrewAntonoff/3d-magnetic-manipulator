@@ -12,6 +12,7 @@
 ../Core/Src/sensor_mlx90393.c:302:9:Read_Sensor	1
 ../Core/Src/sensor_mlx90393.c:306:6:Calibrate_Sensors_Start	3
 ../Core/Src/sensor_mlx90393.c:315:9:Test_Sensor_Connection	2
-../Core/Src/sensor_mlx90393.c:320:6:Get_Sensor_Stats_String	3
-../Core/Src/sensor_mlx90393.c:328:6:Save_Calibration_To_Flash	3
-../Core/Src/sensor_mlx90393.c:346:6:Load_Calibration_From_Flash	6
+../Core/Src/sensor_mlx90393.c:324:7:Calculate_Magnetic_Field_Strength	2
+../Core/Src/sensor_mlx90393.c:334:6:Get_Sensor_Stats_String	3
+../Core/Src/sensor_mlx90393.c:342:6:Save_Calibration_To_Flash	3
+../Core/Src/sensor_mlx90393.c:360:6:Load_Calibration_From_Flash	6

@@ -79,28 +79,33 @@ typedef struct {
 #pragma pack(pop)
 
 // --- Определения для катушек (coil_driver.c) ---
-#define PWM_MAX_VALUE 1000.0f // Максимальное значение PWM (например, ARR таймера)
+#define PWM_MAX_VALUE 999.0f // Максимальное значение PWM (например, ARR таймера)
 #define OVERCURRENT_THRESHOLD 1000.0f // Порог тока в mA (примерное значение)
 
 // --- Определения PID (levitation_control.c) ---
-typedef enum {
-    MODE_IDLE,
-    MODE_CALIBRATION,
-    MODE_LEVITATION,
-    MODE_ERROR
-} OperationMode_t;
 
 typedef struct {
-    float Kp[3]; // X, Y, Z
-    float Ki[3];
-    float Kd[3];
-    float integral[3];
-    float prev_error[3];
-    float setpoint[3];
-    float output[3];
+    // Позиция (X, Y, Z)
+    float Kp_pos[3];
+    float Ki_pos[3];
+    float Kd_pos[3];
+    float integral_pos[3];
+    float prev_error_pos[3];
+    float setpoint_pos[3];
+    float output_pos[3];
+
+    // Ориентация (roll, pitch, yaw)
+    float Kp_ori[3];
+    float Ki_ori[3];
+    float Kd_ori[3];
+    float integral_ori[3];
+    float prev_error_ori[3];
+    float setpoint_ori[3];
+    float output_ori[3];
+
     float max_integral;
     float max_output;
-} PID_Controller_t;
+} PID_6DOF_t;
 
 // --- Определения для QSPI Flash (qspi_flash.c) ---
 // Команды W25Q64JV
@@ -113,5 +118,38 @@ typedef struct {
 #define W25Q_SECTOR_ERASE         0x20
 #define W25Q_CHIP_ERASE           0xC7
 #define W25Q_JEDEC_ID             0x9F
+
+// ========== Данные IMU (совпадают с пакетом от NRF) ==========
+#pragma pack(push, 1)
+typedef struct {
+    int16_t accel_x;   // mg
+    int16_t accel_y;
+    int16_t accel_z;
+    int16_t gyro_x;    // mdps
+    int16_t gyro_y;
+    int16_t gyro_z;
+    int16_t roll;      // 1e-3 rad
+    int16_t pitch;
+    int16_t yaw;
+    uint8_t  battery;  // 0–100%
+    uint8_t  status;
+    uint16_t sequence;
+} IMU_Data_t;
+#pragma pack(pop)
+
+#define IMU_PACKET_SIZE sizeof(IMU_Data_t)  // должно быть 22
+
+// Глобальная переменная для хранения последних данных
+extern volatile IMU_Data_t last_imu_data;
+extern volatile uint8_t    imu_data_ready;  // флаг, что получен новый пакет
+
+typedef enum {
+    MODE_IDLE,
+    MODE_CALIBRATION,
+    MODE_LEVITATION,          // обычный режим с фиксированной точкой
+    MODE_JOYSTICK_CENTERING,  // возврат в центр при отпускании
+    MODE_JOYSTICK_FREE_ROTATION, // свободное вращение
+    MODE_ERROR
+} OperationMode_t;
 
 #endif /* CONFIG_H */

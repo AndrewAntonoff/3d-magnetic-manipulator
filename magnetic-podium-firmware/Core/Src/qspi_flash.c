@@ -1,6 +1,7 @@
 #include "qspi_flash.h"
 #include "string.h"
 #include "stdio.h"
+#include "debug_console.h"
 
 extern QSPI_HandleTypeDef hqspi;
 

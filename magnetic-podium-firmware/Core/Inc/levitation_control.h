@@ -7,12 +7,16 @@
 // #include "sensor_mlx90393.h"
 #include <stdint.h> // Для uint8_t, uint32_t и т.д.
 
+
 // Прототипы функций
+void Calculate_Coil_Forces(float fx, float fy, float fz,
+                           float tx, float ty, float tz,
+                           float* coil_powers);
+void EstimateBallPosition(float ball_pos[3], const float orientation[4]);
 void Initialize_Coil_Geometry(void);
 void Initialize_Sensor_Geometry(void);
 void Calculate_Ball_Position(Position3D_t* position); // <-- Исправлен тип
 void Update_PID_Controller(float dt);
-void Calculate_Coil_Forces(float fx, float fy, float fz, float* coil_powers);
 void Apply_Levitation_Control(void);
 void Start_Levitation(void);
 void Stop_Levitation(void);

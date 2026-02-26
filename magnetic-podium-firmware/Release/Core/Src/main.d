@@ -38,24 +38,21 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h \
- ../Core/Inc/config.h ../Core/Inc/debug_console.h ../Core/Inc/main.h \
- ../Core/Inc/dma.h ../Core/Inc/spi.h ../Core/Inc/tim.h \
- ../Core/Inc/usart.h ../Core/Inc/gpio.h ../Core/Inc/config.h \
- ../Core/Inc/coil_driver.h ../Core/Inc/sensor_mlx90393.h \
- ../Core/Inc/debug_console.h ../Core/Inc/levitation_control.h \
- ../Core/Inc/coil_driver.h ../Core/Inc/qspi_flash.h \
- ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_core.h \
- ../USB_DEVICE/Target/usbd_conf.h \
+ ../Core/Inc/config.h ../Core/Inc/dma.h ../Core/Inc/main.h \
+ ../Core/Inc/quadspi.h ../Core/Inc/spi.h ../Core/Inc/tim.h \
+ ../Core/Inc/usart.h ../USB_DEVICE/App/usb_device.h \
  ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_def.h \
- ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h \
- ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_core.h \
- ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ctlreq.h \
- ../Core/Inc/usbd_custom_hid_if.h \
+ ../USB_DEVICE/Target/usbd_conf.h ../Core/Inc/gpio.h \
+ ../Core/Inc/debug_console.h ../Core/Inc/coil_driver.h \
+ ../Core/Inc/levitation_control.h ../Core/Inc/coil_driver.h \
+ ../Core/Inc/sensor_mlx90393.h ../Core/Inc/qspi_flash.h \
+ ../Core/Inc/json_commands.h ../Core/Inc/usbd_custom_hid_if.h \
  ../Middlewares/ST/STM32_USB_Device_Library/Class/HID/Inc/usbd_hid.h \
  ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h \
- ../USB_DEVICE/App/usbd_desc.h \
  ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_def.h \
- ../USB_DEVICE/App/usb_device.h ../Core/Inc/quadspi.h
+ ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_core.h \
+ ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h \
+ ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ctlreq.h
 ../Core/Inc/main.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
@@ -97,30 +94,27 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h:
 ../Core/Inc/config.h:
-../Core/Inc/debug_console.h:
-../Core/Inc/main.h:
 ../Core/Inc/dma.h:
+../Core/Inc/main.h:
+../Core/Inc/quadspi.h:
 ../Core/Inc/spi.h:
 ../Core/Inc/tim.h:
 ../Core/Inc/usart.h:
+../USB_DEVICE/App/usb_device.h:
+../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_def.h:
+../USB_DEVICE/Target/usbd_conf.h:
 ../Core/Inc/gpio.h:
-../Core/Inc/config.h:
-../Core/Inc/coil_driver.h:
-../Core/Inc/sensor_mlx90393.h:
 ../Core/Inc/debug_console.h:
+../Core/Inc/coil_driver.h:
 ../Core/Inc/levitation_control.h:
 ../Core/Inc/coil_driver.h:
+../Core/Inc/sensor_mlx90393.h:
 ../Core/Inc/qspi_flash.h:
-../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_core.h:
-../USB_DEVICE/Target/usbd_conf.h:
-../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_def.h:
-../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h:
-../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_core.h:
-../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ctlreq.h:
+../Core/Inc/json_commands.h:
 ../Core/Inc/usbd_custom_hid_if.h:
 ../Middlewares/ST/STM32_USB_Device_Library/Class/HID/Inc/usbd_hid.h:
 ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h:
-../USB_DEVICE/App/usbd_desc.h:
 ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_def.h:
-../USB_DEVICE/App/usb_device.h:
-../Core/Inc/quadspi.h:
+../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_core.h:
+../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h:
+../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ctlreq.h:

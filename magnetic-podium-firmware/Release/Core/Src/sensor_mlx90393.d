@@ -39,8 +39,8 @@ Core/Src/sensor_mlx90393.o: ../Core/Src/sensor_mlx90393.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h \
- ../Core/Inc/config.h ../Core/Inc/debug_console.h ../Core/Inc/config.h \
- ../Core/Inc/qspi_flash.h ../Core/Inc/debug_console.h ../Core/Inc/spi.h
+ ../Core/Inc/config.h ../Core/Inc/config.h ../Core/Inc/qspi_flash.h \
+ ../Core/Inc/debug_console.h ../Core/Inc/spi.h
 ../Core/Inc/sensor_mlx90393.h:
 ../Core/Inc/main.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
@@ -83,7 +83,6 @@ Core/Src/sensor_mlx90393.o: ../Core/Src/sensor_mlx90393.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h:
 ../Core/Inc/config.h:
-../Core/Inc/debug_console.h:
 ../Core/Inc/config.h:
 ../Core/Inc/qspi_flash.h:
 ../Core/Inc/debug_console.h:

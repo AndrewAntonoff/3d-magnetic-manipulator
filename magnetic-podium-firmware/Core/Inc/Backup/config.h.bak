@@ -16,6 +16,27 @@
 #define COIL_LOWER_RADIUS 25.0f  // мм
 #define COIL_HEIGHT_LEVEL2 5.0f  // мм
 
+// --- Структура геометрии датчика ---
+typedef struct {
+    float x, y, z;  // Позиция датчика относительно центра чаши
+    float orientation[3];  // Ориентация датчика (вектор нормали) - НЕ ИСПОЛЬЗУЕТСЯ В ТЕКУЩЕМ КОДЕ
+} SensorGeometry_t;
+
+// --- Структура геометрии катушки ---
+typedef struct {
+    float x, y, z;              // Позиция катушки
+    float orientation[3];      // Вектор направления силы
+    float max_force;           // Максимальная сила (N)
+    float resistance_ohm;      // Сопротивление (Ом)
+} CoilGeometry_t;
+
+// --- Структура 3D позиции ---
+typedef struct {
+    float x, y, z;
+    float confidence; // Уверенность в позиции
+    uint32_t timestamp; // Временная метка
+} Position3D_t;
+
 // --- Структура состояния системы ---
 typedef struct {
     uint8_t coils_enabled;
@@ -41,15 +62,101 @@ typedef struct {
 // --- Определения калибровки ---
 #define CALIBRATION_DATA_SIGNATURE 0xDEADBEEF
 #define CALIBRATION_DATA_VERSION 1
-#define CALIBRATION_DATA_ADDR     (0x00000000UL) // Начало флешки (измени при необходимости)
+#define CALIBRATION_DATA_ADDR     (0x00000000UL)
 
-// --- Определения PID ---
-// Опционально: можно вынести сюда, если используются в нескольких файлах
-// typedef struct {
-//     float Kp[3]; // X, Y, Z
-//     float Ki[3];
-//     float Kd[3];
-//     // ... остальные поля ...
-// } PID_Controller_t;
+// --- Структура HID отчета для джойстика ---
+#pragma pack(push, 1) // Упаковка структуры без выравнивания
+typedef struct {
+    uint8_t report_id; // 0x01 (если используется ID)
+    int16_t x;         // Signed 16-bit
+    int16_t y;         // Signed 16-bit
+    int16_t z;         // Signed 16-bit
+    int16_t rx;        // Signed 16-bit (Pitch)
+    int16_t ry;        // Signed 16-bit (Yaw)
+    int16_t rz;        // Signed 16-bit (Roll)
+    uint32_t buttons;  // 32 бит для кнопок (LSB first)
+} HID_JoystickReport_TypeDef;
+#pragma pack(pop)
+
+// --- Определения для катушек (coil_driver.c) ---
+#define PWM_MAX_VALUE 999.0f // Максимальное значение PWM (например, ARR таймера)
+#define OVERCURRENT_THRESHOLD 1000.0f // Порог тока в mA (примерное значение)
+
+// --- Определения PID (levitation_control.c) ---
+typedef enum {
+    MODE_IDLE,
+    MODE_CALIBRATION,
+    MODE_LEVITATION,
+    MODE_ERROR
+} OperationMode_t;
+
+typedef struct {
+    // Позиция (X, Y, Z)
+    float Kp_pos[3];
+    float Ki_pos[3];
+    float Kd_pos[3];
+    float integral_pos[3];
+    float prev_error_pos[3];
+    float setpoint_pos[3];
+    float output_pos[3];
+
+    // Ориентация (roll, pitch, yaw)
+    float Kp_ori[3];
+    float Ki_ori[3];
+    float Kd_ori[3];
+    float integral_ori[3];
+    float prev_error_ori[3];
+    float setpoint_ori[3];
+    float output_ori[3];
+
+    float max_integral;
+    float max_output;
+} PID_6DOF_t;
+
+// --- Определения для QSPI Flash (qspi_flash.c) ---
+// Команды W25Q64JV
+#define W25Q_WRITE_ENABLE         0x06
+#define W25Q_WRITE_DISABLE        0x04
+#define W25Q_READ_STATUS_REG      0x05
+#define W25Q_READ_DATA            0x03
+#define W25Q_FAST_READ_DATA       0x0B
+#define W25Q_PAGE_PROGRAM         0x02
+#define W25Q_SECTOR_ERASE         0x20
+#define W25Q_CHIP_ERASE           0xC7
+#define W25Q_JEDEC_ID             0x9F
+
+// ========== Данные IMU (совпадают с пакетом от NRF) ==========
+#pragma pack(push, 1)
+typedef struct {
+    int16_t accel_x;   // mg
+    int16_t accel_y;
+    int16_t accel_z;
+    int16_t gyro_x;    // mdps
+    int16_t gyro_y;
+    int16_t gyro_z;
+    int16_t roll;      // 1e-3 rad
+    int16_t pitch;
+    int16_t yaw;
+    uint8_t  battery;  // 0–100%
+    uint8_t  status;
+    uint16_t sequence;
+} IMU_Data_t;
+#pragma pack(pop)
+
+#define IMU_PACKET_SIZE sizeof(IMU_Data_t)  // должно быть 22
+
+// Глобальная переменная для хранения последних данных
+extern volatile IMU_Data_t last_imu_data;
+extern volatile uint8_t    imu_data_ready;  // флаг, что получен новый пакет
+
+typedef enum {
+    MODE_IDLE,
+    MODE_CALIBRATION,
+    MODE_LEVITATION,          // обычный режим с фиксированной точкой
+    MODE_JOYSTICK_CENTERING,  // возврат в центр при отпускании
+    MODE_JOYSTICK_FREE_ROTATION, // свободное вращение
+    MODE_ERROR
+} OperationMode_t;
+#define IMU_PACKET_SIZE 22
 
 #endif /* CONFIG_H */
