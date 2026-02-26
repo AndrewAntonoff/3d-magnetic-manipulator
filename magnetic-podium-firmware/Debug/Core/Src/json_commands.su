@@ -1,2 +1,2 @@
-../Core/Src/json_commands.c:9:6:JSON_Init	4	static
-../Core/Src/json_commands.c:14:6:JSON_ProcessCommand	80	static
+../Core/Src/json_commands.c:9:6:JSON_Init	0	static
+../Core/Src/json_commands.c:14:6:JSON_ProcessCommand	32	static

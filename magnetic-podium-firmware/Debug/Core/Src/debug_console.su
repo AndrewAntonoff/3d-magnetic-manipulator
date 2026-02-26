@@ -1,13 +1,2 @@
-../Core/Src/debug_console.c:10:6:Debug_Init	16	static
-../Core/Src/debug_console.c:14:6:Debug_Print	588	static
-../Core/Src/debug_console.c:35:6:Debug_Set_Log_Level	16	static
-../Core/Src/debug_console.c:39:6:Debug_Set_Output_Format	16	static
-../Core/Src/debug_console.c:43:6:Console_Process_Command	16	static
-../Core/Src/debug_console.c:47:6:Console_Show_Help	4	static
-../Core/Src/debug_console.c:51:6:Console_Show_Status	4	static
-../Core/Src/debug_console.c:55:6:Start_RealTime_Monitoring	16	static
-../Core/Src/debug_console.c:59:6:Stop_RealTime_Monitoring	4	static
-../Core/Src/debug_console.c:63:6:Set_Monitoring_Interval	16	static
-../Core/Src/debug_console.c:67:6:Export_Coil_Data_CSV	8	static
-../Core/Src/debug_console.c:72:6:Export_Sensor_Data_CSV	8	static
-../Core/Src/debug_console.c:77:6:Export_System_Log	8	static
+../Core/Src/debug_console.c:12:6:Debug_Init	0	static
+../Core/Src/debug_console.c:16:6:Debug_Print	580	static

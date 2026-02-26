@@ -41,7 +41,8 @@ Core/Src/levitation_control.o: ../Core/Src/levitation_control.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h \
  ../Core/Inc/config.h ../Core/Inc/main.h ../Core/Inc/coil_driver.h \
- ../Core/Inc/sensor_mlx90393.h ../Core/Inc/debug_console.h
+ ../Core/Inc/sensor_mlx90393.h ../Core/Inc/debug_console.h \
+ ../Core/Inc/coil_calib.h
 ../Core/Inc/levitation_control.h:
 ../Core/Inc/config.h:
 ../Core/Inc/coil_driver.h:
@@ -90,3 +91,4 @@ Core/Src/levitation_control.o: ../Core/Src/levitation_control.c \
 ../Core/Inc/coil_driver.h:
 ../Core/Inc/sensor_mlx90393.h:
 ../Core/Inc/debug_console.h:
+../Core/Inc/coil_calib.h:

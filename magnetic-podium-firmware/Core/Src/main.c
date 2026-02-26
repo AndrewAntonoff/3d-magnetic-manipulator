@@ -24,8 +24,8 @@ If no LICENSE file comes with this software, it is provided AS-IS.
 #include "levitation_control.h"
 #include "sensor_mlx90393.h"
 #include "qspi_flash.h"
-#include "json_commands.h"
 #include "usbd_custom_hid_if.h"
+#include "coil_calib.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -40,6 +40,11 @@ typedef enum {
     WAIT_FOR_55,
     RECEIVING_DATA
 } ImuRxState_t;
+
+static uint8_t binary_rx_mode = 0;
+static uint8_t binary_rx_buffer[sizeof(CoilCalibData_t)];
+static uint32_t binary_rx_index = 0;
+static uint32_t binary_rx_total = 0;
 
 static ImuRxState_t imu_rx_state = WAIT_FOR_AA;
 static uint8_t imu_temp_buf[IMU_PACKET_SIZE];
@@ -136,6 +141,8 @@ uint8_t Quick_Read_Sensor(uint8_t sensor_idx);
 uint8_t Read_Sensor(uint8_t sensor_idx);
 void Calibrate_Sensors_Start(void);
 void Get_Sensor_Stats_String(char *buffer, uint16_t buffer_size);
+void Receive_Coil_Calibration(void);
+void Process_Coil_Calib_Data(uint8_t *buffer, uint32_t len);
 uint8_t Test_Sensor_Connection(uint8_t sensor_idx);
 /* USER CODE END PFP */
 
@@ -151,6 +158,7 @@ void System_Init(void) {
      system_state.coils_enabled = 1;
      Initialize_Coil_Geometry();   // <-- добавить эту строку
      Initialize_Sensor_Geometry();   // <-- добавить эту строку
+     Load_Coil_Calibration();
 
     Debug_Print(LOG_LEVEL_INFO, "Initializing magnetic sensors...\r\n");
     Sensors_Init();
@@ -295,7 +303,92 @@ void Stream_Sensor_Data(void) {
     strcat(buffer, "\n");
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 10);
 }
+void Process_Coil_Calib_Data(uint8_t *buffer, uint32_t len) {
+    Debug_Print(LOG_LEVEL_INFO, "Processing %d bytes...\r\n", len);
 
+    if (len != sizeof(CoilCalibData_t)) {
+        Debug_Print(LOG_LEVEL_ERROR, "Data size mismatch: expected %d, got %d\r\n",
+                    sizeof(CoilCalibData_t), len);
+        return;
+    }
+
+    CoilCalibHeader_t *hdr = (CoilCalibHeader_t*)buffer;
+    Debug_Print(LOG_LEVEL_INFO, "Signature: 0x%08X, Version: %d\r\n",
+                hdr->signature, hdr->version);
+
+    if (hdr->signature != COIL_CALIB_SIGNATURE) {
+        Debug_Print(LOG_LEVEL_ERROR, "Invalid signature\r\n");
+        return;
+    }
+    if (hdr->version != COIL_CALIB_VERSION) {
+        Debug_Print(LOG_LEVEL_ERROR, "Invalid version\r\n");
+        return;
+    }
+    if (hdr->num_coils != COIL_CALIB_NUM_COILS ||
+        hdr->num_sensors != COIL_CALIB_NUM_SENSORS ||
+        hdr->num_points != COIL_CALIB_NUM_POINTS) {
+        Debug_Print(LOG_LEVEL_ERROR, "Size mismatch: coils=%d, sensors=%d, points=%d\r\n",
+                    hdr->num_coils, hdr->num_sensors, hdr->num_points);
+        return;
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "Erasing sectors...\r\n");
+    for (uint32_t addr = COIL_CALIB_FLASH_ADDR; addr < COIL_CALIB_FLASH_ADDR + sizeof(CoilCalibData_t); addr += 4096) {
+        QSPI_Flash_EraseSector(addr);
+        Debug_Print(LOG_LEVEL_INFO, "Erased sector at 0x%06lX\r\n", addr);
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "Writing data to QSPI...\r\n");
+    QSPI_Flash_WriteBuffer(COIL_CALIB_FLASH_ADDR, buffer, sizeof(CoilCalibData_t));
+
+    Debug_Print(LOG_LEVEL_INFO, "Coil calibration saved to QSPI at 0x%06lX\r\n", COIL_CALIB_FLASH_ADDR);
+    HAL_UART_Transmit(&huart2, (uint8_t*)"OK\r\n", 4, 100);
+}
+void Receive_Coil_Calibration(void) {
+    uint8_t buffer[sizeof(CoilCalibData_t)];
+    Debug_Print(LOG_LEVEL_INFO, "Ready to receive %d bytes...\r\n", sizeof(buffer));
+
+    // Принудительно ждём, пока UART освободится
+    HAL_Delay(100);
+
+    // Очищаем возможные остаточные данные в UART (если есть)
+    __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_PEF | UART_CLEAR_FEF);
+
+    HAL_StatusTypeDef status = HAL_UART_Receive(&huart2, buffer, sizeof(buffer), 10000);
+    if (status != HAL_OK) {
+        Debug_Print(LOG_LEVEL_ERROR, "UART receive error: %d\r\n", status);
+        return;
+    }
+
+    // Проверка сигнатуры
+    CoilCalibHeader_t *hdr = (CoilCalibHeader_t*)buffer;
+    if (hdr->signature != COIL_CALIB_SIGNATURE) {
+        Debug_Print(LOG_LEVEL_ERROR, "Invalid signature: expected 0x%08X, got 0x%08X\r\n",
+                    COIL_CALIB_SIGNATURE, hdr->signature);
+        return;
+    }
+    if (hdr->version != COIL_CALIB_VERSION) {
+        Debug_Print(LOG_LEVEL_ERROR, "Invalid version: expected %d, got %d\r\n",
+                    COIL_CALIB_VERSION, hdr->version);
+        return;
+    }
+    if (hdr->num_coils != COIL_CALIB_NUM_COILS ||
+        hdr->num_sensors != COIL_CALIB_NUM_SENSORS ||
+        hdr->num_points != COIL_CALIB_NUM_POINTS) {
+        Debug_Print(LOG_LEVEL_ERROR, "Size mismatch\r\n");
+        return;
+    }
+
+    // Стираем сектора
+    for (uint32_t addr = COIL_CALIB_FLASH_ADDR; addr < COIL_CALIB_FLASH_ADDR + sizeof(CoilCalibData_t); addr += 4096) {
+        QSPI_Flash_EraseSector(addr);
+    }
+
+    // Записываем данные
+    QSPI_Flash_WriteBuffer(COIL_CALIB_FLASH_ADDR, buffer, sizeof(CoilCalibData_t));
+
+    Debug_Print(LOG_LEVEL_INFO, "Coil calibration saved to QSPI at 0x%06lX\r\n", COIL_CALIB_FLASH_ADDR);
+}
 void Calculate_3D_Position(void) {
     Joystick_Report.x = 0;
     Joystick_Report.y = 0;
@@ -340,7 +433,6 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   System_Init();
-  JSON_Init();
 
   HAL_UART_Receive_IT(&huart2, &RxChar, 1);
 
@@ -504,23 +596,36 @@ void SystemClock_Config(void)
 // FIX: ЕДИНСТВЕННЫЙ обработчик UART (объединяем USART2 и USART3)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART2) {
-        if (RxChar == '\r' || RxChar == '\n') {
-            if (command_index > 0) {
-                new_command = 1;
+        if (binary_rx_mode) {
+            // Режим приёма бинарных данных
+            if (binary_rx_index < binary_rx_total) {
+                binary_rx_buffer[binary_rx_index++] = RxChar;
             }
-            HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n", 2, 10);
-        } else if (RxChar == '\b' || RxChar == 127) {
-            if (command_index > 0) {
-                command_index--;
-                HAL_UART_Transmit(&huart2, (uint8_t*)"\b \b", 3, 10);
+            if (binary_rx_index >= binary_rx_total) {
+                // Приняли все данные – выходим из режима и запускаем сохранение
+                binary_rx_mode = 0;
+                // Сохраняем данные (можно вызвать функцию обработки)
+                Process_Coil_Calib_Data(binary_rx_buffer, binary_rx_total);
             }
-        } else if (command_index < sizeof(command_buffer) - 1) {
-            command_buffer[command_index++] = RxChar;
-            HAL_UART_Transmit(&huart2, &RxChar, 1, 10);
+        } else {
+            // Обычный режим командной строки
+            if (RxChar == '\r' || RxChar == '\n') {
+                if (command_index > 0) {
+                    new_command = 1;
+                }
+                HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n", 2, 10);
+            } else if (RxChar == '\b' || RxChar == 127) {
+                if (command_index > 0) {
+                    command_index--;
+                    HAL_UART_Transmit(&huart2, (uint8_t*)"\b \b", 3, 10);
+                }
+            } else if (command_index < sizeof(command_buffer) - 1) {
+                command_buffer[command_index++] = RxChar;
+                HAL_UART_Transmit(&huart2, &RxChar, 1, 10);
+            }
         }
         HAL_UART_Receive_IT(&huart2, &RxChar, 1);
     }
-    // Для USART3 обработка будет в прерывании (вызов Process_IMU_Byte), здесь не требуется
 }
 
 // FIX: ЕДИНСТВЕННЫЙ Error_Handler
@@ -556,14 +661,6 @@ void Process_Console_Commands(void) {
         return;
     }
 
-    // FIX: Проверка на JSON должна быть здесь, после получения cmd_start
-    if (cmd_start[0] == '{') {
-        JSON_ProcessCommand(cmd_start);
-        command_index = 0;
-        memset(command_buffer, 0, sizeof(command_buffer));
-        Show_Prompt();
-        return;
-    }
 
     char *cmd = strtok(cmd_start, " ");
     if (cmd == NULL) {
@@ -581,14 +678,33 @@ void Process_Console_Commands(void) {
     }
     else if (strcmp(cmd, "coil") == 0) {
         char *idx_str = strtok(NULL, " ");
-        char *pwr_str = strtok(NULL, " ");
-        if (idx_str && pwr_str) {
+        char *power_str = strtok(NULL, " ");
+        if (idx_str && power_str) {
             int idx = atoi(idx_str);
-            float pwr = atof(pwr_str);
+            float power = atof(power_str);
             if (idx >= 0 && idx < NUM_COILS) {
-                Set_Coil_Power(idx, pwr);
+                Set_Coil_Power(idx, power);
+                Debug_Print(LOG_LEVEL_INFO, "Coil %d set to %.2f\r\n", idx, power);
+            } else {
+                Debug_Print(LOG_LEVEL_ERROR, "Invalid coil index\r\n");
             }
+        } else {
+            Debug_Print(LOG_LEVEL_ERROR, "Usage: coil <idx> <power>\r\n");
         }
+    }
+    else if (strcmp(cmd, "coil_all") == 0) {
+        char *power_str = strtok(NULL, " ");
+        if (power_str) {
+            float power = atof(power_str);
+            Set_All_Coils_Power(power);
+            Debug_Print(LOG_LEVEL_INFO, "All coils set to %.2f\r\n", power);
+        } else {
+            Debug_Print(LOG_LEVEL_ERROR, "Usage: coil_all <power>\r\n");
+        }
+    }
+    else if (strcmp(cmd, "coil_off") == 0) {
+        Stop_All_Coils();
+        Debug_Print(LOG_LEVEL_INFO, "All coils turned off\r\n");
     }
     else if (strcmp(cmd, "sensor") == 0) {
         char *arg = strtok(NULL, " ");
@@ -755,6 +871,15 @@ void Process_Console_Commands(void) {
     }
     else if (strcmp(cmd, "stop_levitate") == 0) {
         Stop_Levitation();
+    }
+    else if (strcmp(cmd, "flash_coil") == 0) {
+        Debug_Print(LOG_LEVEL_INFO, "Ready to receive %d bytes...\r\n", sizeof(CoilCalibData_t));
+        // Подготавливаем приём бинарных данных
+        binary_rx_mode = 1;
+        binary_rx_index = 0;
+        binary_rx_total = sizeof(CoilCalibData_t);
+        // Отправляем подтверждение готовности
+        HAL_UART_Transmit(&huart2, (uint8_t*)"G", 1, 100);
     }
     else if (strcmp(cmd, "set_target") == 0) {
         char *x_str = strtok(NULL, " ");

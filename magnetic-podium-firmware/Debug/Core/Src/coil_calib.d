@@ -1,6 +1,5 @@
-Core/Src/json_commands.o: ../Core/Src/json_commands.c \
- ../Core/Inc/json_commands.h ../Core/Inc/cJSON.h \
- ../Core/Inc/debug_console.h ../Core/Inc/main.h \
+Core/Src/coil_calib.o: ../Core/Src/coil_calib.c ../Core/Inc/coil_calib.h \
+ ../Core/Inc/qspi_flash.h ../Core/Inc/main.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
  ../Core/Inc/stm32h7xx_hal_conf.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h \
@@ -40,11 +39,9 @@ Core/Src/json_commands.o: ../Core/Src/json_commands.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h \
- ../Core/Inc/config.h ../Core/Inc/levitation_control.h \
- ../Core/Inc/coil_driver.h ../Core/Inc/coil_driver.h
-../Core/Inc/json_commands.h:
-../Core/Inc/cJSON.h:
-../Core/Inc/debug_console.h:
+ ../Core/Inc/config.h ../Core/Inc/debug_console.h
+../Core/Inc/coil_calib.h:
+../Core/Inc/qspi_flash.h:
 ../Core/Inc/main.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
@@ -86,6 +83,4 @@ Core/Src/json_commands.o: ../Core/Src/json_commands.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h:
 ../Core/Inc/config.h:
-../Core/Inc/levitation_control.h:
-../Core/Inc/coil_driver.h:
-../Core/Inc/coil_driver.h:
+../Core/Inc/debug_console.h:

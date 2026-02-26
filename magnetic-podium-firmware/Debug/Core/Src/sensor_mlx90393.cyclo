@@ -1,10 +1,5 @@
-../Core/Src/sensor_mlx90393.c:20:16:mlx90393_reset	2
-../Core/Src/sensor_mlx90393.c:35:16:mlx90393_exit	2
-../Core/Src/sensor_mlx90393.c:50:16:mlx90393_start_sm_xyzT	3
-../Core/Src/sensor_mlx90393.c:66:16:mlx90393_read_rm_xyzT	6
-../Core/Src/sensor_mlx90393.c:89:17:calculate_calibration_checksum	2
-../Core/Src/sensor_mlx90393.c:98:6:ConfigureSensor	5
-../Core/Src/sensor_mlx90393.c:126:6:Sensors_Init	14
+../Core/Src/sensor_mlx90393.c:35:16:mlx90393_exit.isra	1
+../Core/Src/sensor_mlx90393.c:98:6:ConfigureSensor	4
 ../Core/Src/sensor_mlx90393.c:189:9:Read_Sensor_With_Gain	6
 ../Core/Src/sensor_mlx90393.c:237:6:Calibrate_Offset_Procedure	5
 ../Core/Src/sensor_mlx90393.c:281:9:Read_Sensor_Calibrated	3
@@ -16,3 +11,4 @@
 ../Core/Src/sensor_mlx90393.c:334:6:Get_Sensor_Stats_String	3
 ../Core/Src/sensor_mlx90393.c:342:6:Save_Calibration_To_Flash	3
 ../Core/Src/sensor_mlx90393.c:360:6:Load_Calibration_From_Flash	6
+../Core/Src/sensor_mlx90393.c:126:6:Sensors_Init	12

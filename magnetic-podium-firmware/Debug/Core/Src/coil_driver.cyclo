@@ -1,5 +1,5 @@
-../Core/Src/coil_driver.c:15:6:Coils_Init	25
-../Core/Src/coil_driver.c:71:6:Set_Coil_Power	13
+../Core/Src/coil_driver.c:15:6:Coils_Init	13
+../Core/Src/coil_driver.c:71:6:Set_Coil_Power	14
 ../Core/Src/coil_driver.c:104:6:Set_All_Coils_Power	2
 ../Core/Src/coil_driver.c:111:6:Stop_All_Coils	1
 ../Core/Src/coil_driver.c:116:7:Get_Coil_Power	2
@@ -11,7 +11,7 @@
 ../Core/Src/coil_driver.c:189:6:Reset_Coil_Fault	2
 ../Core/Src/coil_driver.c:197:9:Get_Coil_Fault_Status	2
 ../Core/Src/coil_driver.c:203:13:Get_Coil_Fault_Reason	2
-../Core/Src/coil_driver.c:210:6:Get_Coils_Status_String	3
+../Core/Src/coil_driver.c:210:6:Get_Coils_Status_String	2
 ../Core/Src/coil_driver.c:220:7:Get_Coils_Average_Power	2
-../Core/Src/coil_driver.c:229:7:Get_Coils_Max_Power	3
+../Core/Src/coil_driver.c:229:7:Get_Coils_Max_Power	2
 ../Core/Src/coil_driver.c:239:10:Get_Coils_Total_On_Time	2

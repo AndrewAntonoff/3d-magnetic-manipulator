@@ -7,6 +7,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#include "coil_calib.h"
 
 // Если нужно, можно раскомментировать после добавления CMSIS-DSP
 // #include "arm_math.h"
@@ -758,19 +759,38 @@ void EstimateBallPosition(float ball_pos[3], const float orientation[4])
     Debug_Print(LOG_LEVEL_INFO, "EstimateBallPosition: rough_m=(%.3f,%.3f,%.3f)\n",
                 p_m[0], p_m[1], p_m[2]);
 
-    // 2. Измерения с датчиков (оставляем в µT, они не требуют пересчёта)
-    float B_ball_T[5][3];
-    for (int i = 0; i < 5; i++) {
-        B_ball_T[i][0] = sensors[i].magnetic_field[0] * 1e-6f;
-        B_ball_T[i][1] = sensors[i].magnetic_field[1] * 1e-6f;
-        B_ball_T[i][2] = sensors[i].magnetic_field[2] * 1e-6f;
+    // NEW: получаем текущие токи всех катушек
+    float coil_currents[NUM_COILS];
+    for (int c = 0; c < NUM_COILS; c++) {
+        coil_currents[c] = Get_Coil_Power(c);
     }
 
-    // 3. Магнитный момент шара (пока постоянный, в системе СИ)
-    float m[3] = {0.0f, 0.0f, 1.0f};  // Увеличьте до ~1.0 А·м²; калибруйте эмпирически
+    // NEW: вычисляем суммарное поле катушек (в µT)
+    float B_coil_total[5][3] = {{0}};
+    for (int c = 0; c < NUM_COILS; c++) {
+        float field_c[5][3];
+        Get_Coil_Field(c, coil_currents[c], field_c);
+        for (int s = 0; s < 5; s++) {
+            for (int k = 0; k < 3; k++) {
+                B_coil_total[s][k] += field_c[s][k];
+            }
+        }
+    }
+
+    // 2. Измерения с датчиков (переводим в Теслы, вычитая offset и поле катушек)
+    float B_ball_T[5][3];
+    for (int i = 0; i < 5; i++) {
+        B_ball_T[i][0] = (sensors[i].magnetic_field[0] - sensors[i].offset[0] - B_coil_total[i][0]) * 1e-6f;
+        B_ball_T[i][1] = (sensors[i].magnetic_field[1] - sensors[i].offset[1] - B_coil_total[i][1]) * 1e-6f;
+        B_ball_T[i][2] = (sensors[i].magnetic_field[2] - sensors[i].offset[2] - B_coil_total[i][2]) * 1e-6f;
+    }
+
+    // 3. Магнитный момент шара (в СИ) - пока оставим как есть, но нужно уточнить
+    float m[3] = {0.0f, 0.0f, 1.0f};  // TODO: заменить на реальный момент
+
     // 4. Итерации Гаусса-Ньютона (p_m уже в метрах)
     for (int iter = 0; iter < 5; iter++) {
-        GaussNewtonIteration(p_m, m, B_ball_T);   // было B_ball, исправлено на B_ball_T
+        GaussNewtonIteration(p_m, m, B_ball_T);
     }
 
     // 5. Ограничение в пределах чаши (переводим в мм для удобства)
@@ -791,25 +811,4 @@ void EstimateBallPosition(float ball_pos[3], const float orientation[4])
 
     Debug_Print(LOG_LEVEL_INFO, "EstimateBallPosition: final=(%.1f,%.1f,%.1f)\n",
                 ball_pos[0], ball_pos[1], ball_pos[2]);
-}
-
-static uint8_t IsBallReleased(void)
-{
-    // Функция пока не используется, но для полноты оставим заглушку
-    static float prev_pos[3] = {0};
-    float dt = 0.01f; // примерное dt, лучше передавать параметром
-
-    float vel_x = (system_state.ball_position[0] - prev_pos[0]) / dt;
-    float vel_y = (system_state.ball_position[1] - prev_pos[1]) / dt;
-    float vel_z = (system_state.ball_position[2] - prev_pos[2]) / dt;
-    float speed = sqrtf(vel_x*vel_x + vel_y*vel_y + vel_z*vel_z);
-
-    float dist_to_home = sqrtf( system_state.ball_position[0]*system_state.ball_position[0] +
-                                system_state.ball_position[1]*system_state.ball_position[1] +
-                                (system_state.ball_position[2]-HOME_Z)*(system_state.ball_position[2]-HOME_Z) );
-
-    if (dist_to_home < RELEASE_DIST_THRESH && speed < RELEASE_SPEED_THRESH) {
-        return 1;
-    }
-    return 0;
 }

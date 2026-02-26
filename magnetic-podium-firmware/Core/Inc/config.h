@@ -79,7 +79,7 @@ typedef struct {
 #pragma pack(pop)
 
 // --- Определения для катушек (coil_driver.c) ---
-#define PWM_MAX_VALUE 999.0f // Максимальное значение PWM (например, ARR таймера)
+#define PWM_MAX_VALUE 2499.0f // Максимальное значение PWM (например, ARR таймера)
 #define OVERCURRENT_THRESHOLD 1000.0f // Порог тока в mA (примерное значение)
 
 // --- Определения PID (levitation_control.c) ---
