@@ -6,17 +6,30 @@
 #include <string.h>
 #include <stdio.h>   // для snprintf
 #include <math.h>
+#include "main.h" // может понадобиться для HAL_GPIO_WritePin и т.д.
+#include "core_cm7.h"  // для функций работы с кэшем
+extern SPI_HandleTypeDef hspi1;
 
 // ==================== Задержки ====================
-#define CS_DELAY_MS         2
-#define POST_CS_DELAY_MS    5
-#define EXIT_DELAY_MS       5
-#define SM_CONV_DELAY_MS    20
+#define CS_DELAY_MS         0
+#define POST_CS_DELAY_MS    0
+#define EXIT_DELAY_MS       0
+#define SM_CONV_DELAY_MS    1
 
 // ==================== Глобальный массив датчиков ====================
 MLX90393_t sensors[NUM_SENSORS];
 
+uint8_t current_dma_sensor = 0; // индекс датчика, для которого запущена текущая DMA-передача
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi);
+
+static uint8_t dma_state_machine = 0;        // 0 - idle, 1 - ожидание преобразования, 2 - чтение
+static uint32_t conversion_start_time = 0;
+static const uint8_t start_cmd[2] = {0x3F, 0x00}; // команда запуска измерения
+
 // ==================== Внутренние функции (определения) ====================
+static void Start_All_Sensors_Conversion(void);
+static void Start_Next_Sensor_Read(void);
+
 static uint8_t mlx90393_reset(MLX90393_t *sensor) {
     uint8_t tx[2] = {0xF0, 0x00};
     uint8_t rx[2];
@@ -102,7 +115,7 @@ void ConfigureSensor(uint8_t sensor_idx) {
     mlx90393_exit(s);
     mlx90393_reset(s);
     mlx90393_exit(s);
-    HAL_Delay(10);
+    HAL_Delay(20);
 
     uint8_t tx[2] = {0x00, 0x00};
     uint8_t rx[2] = {0xFF, 0xFF};
@@ -115,7 +128,7 @@ void ConfigureSensor(uint8_t sensor_idx) {
     if (status == HAL_OK && !(rx[0] == 0xFF && rx[1] == 0xFF)) {
         s->is_connected = 1;
         Debug_Print(LOG_LEVEL_INFO, "Sensor %d ready (factory settings, GAIN_SEL=7)\r\n", sensor_idx);
-        s->gain_sel = 7;
+        s->gain_sel = 1;
     } else {
         s->is_connected = 0;
         Debug_Print(LOG_LEVEL_ERROR, "Sensor %d not responding\r\n", sensor_idx);
@@ -125,6 +138,14 @@ void ConfigureSensor(uint8_t sensor_idx) {
 // ==================== Инициализация всех датчиков ====================
 void Sensors_Init(void) {
     Debug_Print(LOG_LEVEL_INFO, "Initializing magnetic sensors...\r\n");
+    HAL_SPI_DMAStop(&hspi1);
+    HAL_Delay(10);
+    // Сброс состояний датчиков
+    for (int i = 0; i < NUM_SENSORS; i++) {
+        sensors[i].dma_state = 0;
+        sensors[i].is_connected = 0;
+    }
+    dma_state_machine = 0;
 
     for (uint8_t i = 0; i < NUM_SENSORS; i++) {
         sensors[i].spi       = &hspi1;
@@ -155,6 +176,10 @@ void Sensors_Init(void) {
         sensors[i].gain_sel         = 7;
         sensors[i].offset[0] = sensors[i].offset[1] = sensors[i].offset[2] = 0.0f;
         sensors[i].scale[0] = sensors[i].scale[1] = sensors[i].scale[2] = 1.0f;
+        sensors[i].dma_state = 0;
+
+        memset(sensors[i].tx_dma, 0, sizeof(sensors[i].tx_dma));
+        memset(sensors[i].rx_dma, 0, sizeof(sensors[i].rx_dma));
     }
 
     for (uint8_t i = 0; i < ACTIVE_SENSORS; i++) {
@@ -170,13 +195,34 @@ void Sensors_Init(void) {
         if (status == HAL_OK && !(rx[0] == 0xFF && rx[1] == 0xFF)) {
             Debug_Print(LOG_LEVEL_INFO, "Sensor %d detected\r\n", i);
             ConfigureSensor(i);
+            if (sensors[i].is_connected) {
+                HAL_Delay(10); // дать время датчику устаканиться
+            }
         } else {
             sensors[i].is_connected = 0;
             Debug_Print(LOG_LEVEL_WARNING, "Sensor %d not detected\r\n", i);
         }
     }
-
+    Debug_Print(LOG_LEVEL_INFO, "Connected sensors: ");
+    for (int i = 0; i < ACTIVE_SENSORS; i++) {
+        Debug_Print(LOG_LEVEL_INFO, "%d:%d ", i, sensors[i].is_connected);
+    }
+    Debug_Print(LOG_LEVEL_INFO, "\n");
     Load_Calibration_From_Flash();
+    // Принудительный сброс состояний DMA
+    for (int i = 0; i < ACTIVE_SENSORS; i++) {
+        sensors[i].dma_state = 0;
+        sensors[i].dma_start_tick = 0;
+    }
+    dma_state_machine = 0;
+    conversion_start_time = 0;
+
+    // Небольшая задержка перед запуском
+    HAL_Delay(100);
+
+    // Принудительно запустить первый цикл DMA
+    Update_Sensors_DMA();
+
 }
 
 // ==================== Таблица коэффициентов ====================
@@ -384,4 +430,261 @@ void Load_Calibration_From_Flash(void) {
         sensors[i].is_calibrated = 1;
     }
     Debug_Print(LOG_LEVEL_INFO, "Calibration loaded.");
+}
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi->Instance == SPI1) {
+        Debug_Print(LOG_LEVEL_ERROR, "SPI error on sensor %d, error=%lu\n", current_dma_sensor, hspi->ErrorCode);
+        sensors[current_dma_sensor].dma_state = 0;
+        HAL_GPIO_WritePin(sensors[current_dma_sensor].cs_port, sensors[current_dma_sensor].cs_pin, GPIO_PIN_SET);
+        HAL_SPI_DMAStop(&hspi1);
+    }
+}
+
+uint8_t Read_Sensor_DMA_Start(uint8_t sensor_idx)
+{
+   // Debug_Print(LOG_LEVEL_INFO, "RStart %d\n", sensor_idx);
+    if (sensor_idx >= NUM_SENSORS) return 0;
+    MLX90393_t *s = &sensors[sensor_idx];
+    if (!s->is_connected) {
+        Debug_Print(LOG_LEVEL_WARNING, "Sensor %d not connected\n", sensor_idx);
+        return 0;
+    }
+    if (s->dma_state != 0) {
+        Debug_Print(LOG_LEVEL_WARNING, "Sensor %d state %d\n", sensor_idx, s->dma_state);
+        return 0;
+    }
+
+    // Подготовка команды чтения
+    uint8_t cmd[10] = {0x4F, 0x00, 0,0,0,0,0,0,0,0};
+    memcpy(s->tx_dma, cmd, 10);
+
+    // Очищаем кэш для TX-буфера (чтобы данные точно попали в память)
+    SCB_CleanDCache_by_Addr((uint32_t*)s->tx_dma, 10);
+    // Инвалидируем RX-буфер перед приёмом (чтобы процессор не использовал старые данные)
+    SCB_InvalidateDCache_by_Addr((uint32_t*)s->rx_dma, 10);
+
+    HAL_GPIO_WritePin(s->cs_port, s->cs_pin, GPIO_PIN_RESET);
+    for (volatile int i = 0; i < 10; i++); // небольшая задержка
+
+    s->dma_state = 1;
+    s->dma_start_tick = HAL_GetTick();  // запоминаем время старта
+    HAL_StatusTypeDef status = HAL_SPI_TransmitReceive_DMA(s->spi, s->tx_dma, s->rx_dma, 10);
+    if (status != HAL_OK) {
+        Debug_Print(LOG_LEVEL_ERROR, "DMA start failed for sensor %d, status=%d\n", sensor_idx, status);
+        HAL_GPIO_WritePin(s->cs_port, s->cs_pin, GPIO_PIN_SET);
+        s->dma_state = 0;
+        return 0;
+
+    }
+    return 1;
+}
+
+uint8_t Process_Sensor_DMA_Data(uint8_t sensor_idx)
+{
+    if (sensor_idx >= NUM_SENSORS) return 0;
+    MLX90393_t *s = &sensors[sensor_idx];
+    if (s->dma_state != 2) return 0;
+
+    // Парсинг данных из rx_dma
+    uint16_t traw = (s->rx_dma[2] << 8) | s->rx_dma[3];
+    int16_t xraw = (int16_t)((s->rx_dma[4] << 8) | s->rx_dma[5]);
+    int16_t yraw = (int16_t)((s->rx_dma[6] << 8) | s->rx_dma[7]);
+    int16_t zraw = (int16_t)((s->rx_dma[8] << 8) | s->rx_dma[9]);
+
+    uint8_t gain = (s->gain_sel <= 7) ? s->gain_sel : 7;
+    float lsb_xy = gain_coeff[gain][0];
+    float lsb_z  = gain_coeff[gain][1];
+
+    // Защита от прерываний при обновлении данных
+    __disable_irq();
+    s->magnetic_field[0] = xraw * lsb_xy;
+    s->magnetic_field[1] = yraw * lsb_xy;
+    s->magnetic_field[2] = zraw * lsb_z;
+    s->temperature = ((float)traw - 46244.0f) / 45.2f + 25.0f;
+    __enable_irq();
+
+    s->dma_state = 0; // теперь датчик свободен
+    s->last_read_time = HAL_GetTick();
+    return 1;
+}
+
+void Update_Sensors_DMA(void)
+{
+	static uint32_t last_dma_log = 0;
+	    uint32_t now = HAL_GetTick();
+
+	    // Выводим состояние раз в 2 секунды, чтобы не засорять лог
+	    if (now - last_dma_log > 2000) {
+	        last_dma_log = now;
+	        Debug_Print(LOG_LEVEL_INFO, "DMA state: %d, time since conv: %lu ms\n",
+	                    dma_state_machine, now - conversion_start_time);
+	    }
+
+    switch (dma_state_machine) {
+        case 0:
+        {
+            static uint32_t last_conv_start = 0;
+            // Не запускать новое преобразование слишком часто
+            if (now - last_conv_start < 10) {
+                break;
+            }
+            uint8_t all_free = 1;
+            for (int i = 0; i < ACTIVE_SENSORS; i++) {
+                if (sensors[i].dma_state != 0) {
+                    all_free = 0;
+                    break;
+                }
+            }
+            if (all_free) {
+                Start_All_Sensors_Conversion();
+                last_conv_start = now;
+                conversion_start_time = now;
+                dma_state_machine = 1;
+            }
+            break;
+        }
+        case 1:
+        {
+            if (now - conversion_start_time >= 2) {
+                dma_state_machine = 2;
+                Start_Next_Sensor_Read();
+            }
+            break;
+        }
+        case 2:
+        {
+            // Обработка готовых данных
+            for (int i = 0; i < ACTIVE_SENSORS; i++) {
+                if (sensors[i].dma_state == 2) {
+                    Process_Sensor_DMA_Data(i);
+                }
+                if (sensors[i].dma_state == 1) {
+                    if (now - sensors[i].dma_start_tick > 200) {
+                        Debug_Print(LOG_LEVEL_ERROR, "DMA timeout for sensor %d, SPI state=%d, error=%lu\n",
+                                    i, hspi1.State, hspi1.ErrorCode);
+                        HAL_GPIO_WritePin(sensors[i].cs_port, sensors[i].cs_pin, GPIO_PIN_SET);
+                        HAL_SPI_DMAStop(&hspi1);
+                        sensors[i].dma_state = 0;
+                    }
+                }
+            }
+
+            // Проверка таймаута
+            for (int i = 0; i < ACTIVE_SENSORS; i++) {
+                if (sensors[i].dma_state == 1) {
+                    if (now - sensors[i].dma_start_tick > 200) {
+                        Debug_Print(LOG_LEVEL_ERROR, "DMA timeout for sensor %d\n", i);
+                        HAL_GPIO_WritePin(sensors[i].cs_port, sensors[i].cs_pin, GPIO_PIN_SET);
+                        HAL_SPI_DMAStop(&hspi1);
+                        sensors[i].dma_state = 0;
+                    }
+                }
+            }
+
+            uint8_t busy = 0;
+            for (int i = 0; i < ACTIVE_SENSORS; i++) {
+                if (sensors[i].dma_state == 1) {
+                    busy = 1;
+                    break;
+                }
+            }
+
+            if (!busy) {
+                uint8_t all_done = 1;
+                for (int i = 0; i < ACTIVE_SENSORS; i++) {
+                    if (sensors[i].dma_state != 0) {
+                        all_done = 0;
+                        break;
+                    }
+                }
+                if (all_done) {
+                    dma_state_machine = 0;
+                } else {
+                    Start_Next_Sensor_Read();
+                }
+            }
+            break;
+        }
+    }
+    if (dma_state_machine == 1 && now - conversion_start_time > 500) {
+        Debug_Print(LOG_LEVEL_WARNING, "DMA machine stalled, resetting\n");
+        dma_state_machine = 0;
+        for (int i = 0; i < ACTIVE_SENSORS; i++) {
+            sensors[i].dma_state = 0;
+        }
+    }
+}
+
+static void Start_All_Sensors_Conversion(void)
+{
+	// Debug_Print(LOG_LEVEL_INFO, "Start conversion\n");
+    // Опускаем CS для всех подключенных датчиков
+    for (int i = 0; i < ACTIVE_SENSORS; i++) {
+        if (sensors[i].is_connected) {
+            HAL_GPIO_WritePin(sensors[i].cs_port, sensors[i].cs_pin, GPIO_PIN_RESET);
+        }
+    }
+    // Небольшая задержка для установки CS
+    for (volatile int i = 0; i < 10; i++);
+    HAL_SPI_DMAStop(&hspi1);
+
+    // Отправляем команду (блокирующе)
+    HAL_SPI_Transmit(&hspi1, (uint8_t*)start_cmd, 2, 10);
+
+    // Поднимаем CS для всех датчиков
+    for (int i = 0; i < ACTIVE_SENSORS; i++) {
+        if (sensors[i].is_connected) {
+            HAL_GPIO_WritePin(sensors[i].cs_port, sensors[i].cs_pin, GPIO_PIN_SET);
+        }
+    }
+}
+
+static void Start_Next_Sensor_Read(void)
+{
+    static uint8_t next_sensor = 0;
+    for (int attempt = 0; attempt < ACTIVE_SENSORS; attempt++) {
+        uint8_t idx = next_sensor;
+        next_sensor = (next_sensor + 1) % ACTIVE_SENSORS;
+        if (sensors[idx].is_connected && sensors[idx].dma_state == 0) {
+            current_dma_sensor = idx;
+            if (Read_Sensor_DMA_Start(idx)) {
+                break;
+            } else {
+                Debug_Print(LOG_LEVEL_ERROR, "Failed to start read for %d\n", idx);
+            }
+        }
+    }
+}
+/**
+  * @brief  Callback при завершении передачи по SPI с DMA.
+  * @param  hspi: указатель на структуру SPI_HandleTypeDef
+  * @retval None
+  */
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi->Instance == SPI1) {
+        // Проверка на ошибки SPI
+        if (hspi->ErrorCode != HAL_SPI_ERROR_NONE) {
+            Debug_Print(LOG_LEVEL_ERROR, "SPI error: %lu\n", hspi->ErrorCode);
+        }
+
+        // Получаем указатель на текущий датчик (глобальная переменная current_dma_sensor)
+        MLX90393_t *s = &sensors[current_dma_sensor];
+
+        // Инвалидируем кэш для приёмного буфера, чтобы процессор увидел свежие данные
+        SCB_InvalidateDCache_by_Addr((uint32_t*)s->rx_dma, 10);
+
+        // Поднимаем CS
+        HAL_GPIO_WritePin(s->cs_port, s->cs_pin, GPIO_PIN_SET);
+
+        // Останавливаем DMA (на всякий случай)
+        HAL_SPI_DMAStop(hspi);
+
+        // Отмечаем, что данные готовы
+        s->dma_state = 2;
+
+        // Опционально: отладочный вывод (можно закомментировать)
+        // Debug_Print(LOG_LEVEL_INFO, "DMA complete for sensor %d\n", current_dma_sensor);
+    }
 }

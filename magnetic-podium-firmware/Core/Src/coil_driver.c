@@ -70,13 +70,14 @@ void Coils_Init(void)
 
 void Set_Coil_Power(uint8_t coil_idx, float power)
 {
-	Debug_Print(LOG_LEVEL_INFO, "Set_Coil_Power(%d, %f)\r\n", coil_idx, power);
+	// Debug_Print(LOG_LEVEL_INFO, "Set_Coil_Power(%d, %f)\r\n", coil_idx, power);
     if (coil_idx >= NUM_COILS) return;
     if (coils[coil_idx].is_faulty) return;
 
     // Ограничение мощности
-    if (power > 1.0f) power = 1.0f;
-    if (power < -1.0f) power = -1.0f;
+    	float max_power = 1.0f;
+        if (power > max_power) power = max_power;
+        if (power < -max_power) power = -max_power;
 
     Coil_t *coil = &coils[coil_idx];
 
@@ -243,4 +244,25 @@ uint32_t Get_Coils_Total_On_Time(void)
         total += coils[i].total_on_time_ms;
     }
     return total;
+}
+
+/**
+ * @brief Возвращает мощность катушки со знаком.
+ * @param coil_idx Индекс катушки (0..NUM_COILS-1)
+ * @return Значение мощности в диапазоне [-1..1] (отрицательное – обратное направление)
+ */
+float Get_Coil_SignedPower(uint8_t coil_idx)
+{
+    if (coil_idx >= NUM_COILS) return 0.0f;
+    Coil_t *coil = &coils[coil_idx];
+
+    // Читаем состояние пина направления
+    GPIO_PinState pin_state = HAL_GPIO_ReadPin(coil->dir_port, coil->dir_pin);
+
+    // Если пин установлен (GPIO_PIN_SET) – направление отрицательное, иначе положительное
+    if (pin_state == GPIO_PIN_SET) {
+        return -coil->current_pwm;
+    } else {
+        return coil->current_pwm;
+    }
 }

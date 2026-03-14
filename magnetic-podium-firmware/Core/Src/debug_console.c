@@ -7,7 +7,7 @@
 
 static UART_HandleTypeDef* debug_uart = NULL;
 static LogLevel_t current_log_level = LOG_LEVEL_INFO;
-static OutputFormat_t current_format = FORMAT_HUMAN;
+
 
 void Debug_Init(UART_HandleTypeDef* huart) {
     debug_uart = huart;

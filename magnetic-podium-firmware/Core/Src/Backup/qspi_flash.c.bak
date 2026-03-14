@@ -199,12 +199,12 @@ void QSPI_Flash_ReadBuffer(uint32_t address, uint8_t *data, uint32_t len) {
     cmd.DdrHoldHalfCycle = QSPI_DDR_HHC_ANALOG_DELAY;
     cmd.SIOOMode = QSPI_SIOO_INST_EVERY_CMD;
 
-    if (HAL_QSPI_Command(&hqspi, &cmd, 5000) != HAL_OK) {  // Таймаут 1000ms
+    if (HAL_QSPI_Command(&hqspi, &cmd, 10000) != HAL_OK) {  // Таймаут 1000ms
         Debug_Print(LOG_LEVEL_ERROR, "QSPI command timeout!\r\n");
         return;
     }
 
-    if (HAL_QSPI_Receive(&hqspi, data, 5000) != HAL_OK) {  // Таймаут 1000ms
+    if (HAL_QSPI_Receive(&hqspi, data, 10000) != HAL_OK) {  // Таймаут 1000ms
         Debug_Print(LOG_LEVEL_ERROR, "QSPI receive timeout!\r\n");
         return;
     }

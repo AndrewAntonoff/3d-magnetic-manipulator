@@ -1,2 +1,2 @@
-../Core/Src/coil_calib.c:8:6:Load_Coil_Calibration	6
-../Core/Src/coil_calib.c:29:6:Get_Coil_Field	16
+../Core/Src/coil_calib.c:13:6:Load_Coil_Calibration	8
+../Core/Src/coil_calib.c:50:6:Get_Coil_Field	13

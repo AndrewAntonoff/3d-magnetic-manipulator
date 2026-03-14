@@ -1,2 +1,2 @@
-../Core/Src/debug_console.c:12:6:Debug_Init	16	static
-../Core/Src/debug_console.c:16:6:Debug_Print	588	static
+../Core/Src/debug_console.c:12:6:Debug_Init	0	static
+../Core/Src/debug_console.c:16:6:Debug_Print	580	static

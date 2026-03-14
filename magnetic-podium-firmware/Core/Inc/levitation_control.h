@@ -6,7 +6,8 @@
 #include "coil_driver.h"
 // #include "sensor_mlx90393.h"
 #include <stdint.h> // Для uint8_t, uint32_t и т.д.
-
+extern SystemState_t system_state;
+extern PID_6DOF_t pid_controller;
 
 // Прототипы функций
 void Calculate_Coil_Forces(float fx, float fy, float fz,

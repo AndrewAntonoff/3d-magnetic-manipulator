@@ -54,5 +54,6 @@ void Get_Coils_Status_String(char* buffer, uint16_t buffer_size);
 float Get_Coils_Average_Power(void);
 float Get_Coils_Max_Power(void);
 uint32_t Get_Coils_Total_On_Time(void);
+float Get_Coil_SignedPower(uint8_t coil_idx);
 
 #endif

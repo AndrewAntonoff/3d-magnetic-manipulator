@@ -19,12 +19,13 @@ If no LICENSE file comes with this software, it is provided AS-IS.
 #include "usart.h"
 #include "usb_device.h"
 #include "gpio.h"
+#include "config.h"
 #include "debug_console.h"
 #include "coil_driver.h"
 #include "levitation_control.h"
 #include "sensor_mlx90393.h"
 #include "qspi_flash.h"
-#include "json_commands.h"
+#include "coil_calib.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -34,44 +35,36 @@ If no LICENSE file comes with this software, it is provided AS-IS.
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
-// Структура HID отчета для джойстика
-// УБРАНА: теперь определена в config.h
-// #pragma pack(push, 1) // Упаковка структуры без выравнивания
-// typedef struct {
-//     uint8_t report_id; // 0x01 (если используется ID)
-//     int16_t x;         // Signed 16-bit
-//     int16_t y;         // Signed 16-bit
-//     int16_t z;         // Signed 16-bit
-//     int16_t rx;        // Signed 16-bit (Pitch)
-//     int16_t ry;        // Signed 16-bit (Yaw)
-//     int16_t rz;        // Signed 16-bit (Roll)
-//     uint32_t buttons;  // 32 бит для кнопок (LSB first)
-// } HID_JoystickReport_TypeDef;
-// #pragma pack(pop)
 typedef enum {
     WAIT_FOR_AA,
     WAIT_FOR_55,
     RECEIVING_DATA
 } ImuRxState_t;
 
+static uint8_t binary_rx_mode = 0;
+static uint8_t binary_rx_buffer[sizeof(CoilCalibData_t)];
+static uint32_t binary_rx_index = 0;
+static uint32_t binary_rx_total = 0;
+
 static ImuRxState_t imu_rx_state = WAIT_FOR_AA;
 static uint8_t imu_temp_buf[IMU_PACKET_SIZE];
 static uint8_t imu_temp_idx;
+volatile uint8_t control_tick = 0;
 
-// Глобальные структуры
-// Убрано определение SystemState_t, так как оно определено в config.h
-// SystemState_t system_state = { ... }; // Убрано, так как определение в config.h
+// FIX: Определяем глобальные переменные для IMU (они объявлены как extern в main.h)
+volatile IMU_Data_t last_imu_data;
+volatile uint8_t imu_packet_ready = 0;
 
 // Буферы
-char console_buffer[256]; // Уменьшенный буфер
-uint8_t command_buffer[64]; // Уменьшенный буфер команд
+char console_buffer[256];
+uint8_t command_buffer[64];
 uint16_t command_index = 0;
 uint8_t RxChar;
 
 // Тайминги
 uint32_t last_monitor_time = 0;
 uint32_t last_cpu_measure = 0;
-uint32_t last_stream_time = 0; // Для потоковой передачи
+uint32_t last_stream_time = 0;
 
 // Статистика
 uint32_t total_commands = 0;
@@ -80,12 +73,9 @@ uint32_t idle_counter = 0;
 // Флаги
 uint8_t new_command = 0;
 uint8_t streaming_active = 0;
-uint32_t stream_interval_ms = 50;    // Интервал передачи (20 Гц)
+uint32_t stream_interval_ms = 50;
 
 // Глобальная переменная для отчета HID
-// Определение глобальной переменной
-// --- ОПРЕДЕЛЕНИЕ ГЛОБАЛЬНЫХ ПЕРЕМЕННЫХ ---
-
 HID_JoystickReport_TypeDef Joystick_Report = {0};
 
 /* USER CODE END PTD */
@@ -103,14 +93,13 @@ HID_JoystickReport_TypeDef Joystick_Report = {0};
 #define CMD_LEVITATE       "levitate"
 #define CMD_STOP_LEVITATE  "stop_levitate"
 #define CMD_SET_TARGET     "set_target"
-#define CMD_TEST_COIL   "test_coil"
-#define CMD_TEST_ALL     "test_all"
-#define CMD_TEST_GROUP   "test_group"
-#define CMD_STOP_TEST    "stop_test"
-#define CMD_COILS_OFF    "coils_off"
-
+#define CMD_TEST_COIL      "test_coil"
+#define CMD_TEST_ALL       "test_all"
+#define CMD_TEST_GROUP     "test_group"
+#define CMD_STOP_TEST      "stop_test"
+#define CMD_COILS_OFF      "coils_off"
 /* USER CODE END PD */
-#define IMU_PACKET_SIZE 22
+
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
@@ -124,8 +113,6 @@ HID_JoystickReport_TypeDef Joystick_Report = {0};
 extern MLX90393_t sensors[NUM_SENSORS];
 
 /* USER CODE END PV */
-extern SystemState_t system_state;
-extern PID_6DOF_t pid_controller;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -140,9 +127,9 @@ void Calculate_CPU_Usage(void);
 void Update_Uptime(void);
 void Show_Help_Menu(void);
 void Show_System_Status(void);
-void Stream_Sensor_Data(void); // Добавлено
-void Error_Handler(void); // Убедитесь, что только одна реализация
-/* USER CODE BEGIN PFP */
+void Stream_Sensor_Data(void);
+void Error_Handler(void);
+void Process_IMU_Byte(uint8_t byte);
 uint8_t Read_Sensor_With_Gain(uint8_t sensor_idx);
 void Calibrate_Offset_Procedure(uint8_t sensor_idx);
 uint8_t Read_Sensor_Calibrated(uint8_t sensor_idx);
@@ -152,7 +139,10 @@ uint8_t Quick_Read_Sensor(uint8_t sensor_idx);
 uint8_t Read_Sensor(uint8_t sensor_idx);
 void Calibrate_Sensors_Start(void);
 void Get_Sensor_Stats_String(char *buffer, uint16_t buffer_size);
+void Receive_Coil_Calibration(void);
+void Process_Coil_Calib_Data(uint8_t *buffer, uint32_t len);
 uint8_t Test_Sensor_Connection(uint8_t sensor_idx);
+void Check_QSPI(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -160,51 +150,46 @@ uint8_t Test_Sensor_Connection(uint8_t sensor_idx);
 
 // Инициализация системы
 void System_Init(void) {
-    // Инициализация отладки (если используется)
     Debug_Init(&huart2);
     Debug_Print(LOG_LEVEL_INFO, "=== Magnetic Manipulator System Initialization ===\r\n");
 
-    // Инициализация катушек
     Coils_Init();
-    system_state.coils_enabled = 1;
+     system_state.coils_enabled = 1;
+     Initialize_Coil_Geometry();   // <-- добавить эту строку
+     Initialize_Sensor_Geometry();   // <-- добавить эту строку
+     Load_Coil_Calibration();
 
-    // Инициализация датчиков
+     // ---------- НАЧАЛО ВСТАВКИ: проверка калибровки катушек ----------
+         float test_field[5][3];
+         Get_Coil_Field(0, 0.0f, test_field);
+         Debug_Print(LOG_LEVEL_INFO, "Coil 0 at I=0: sensor0 field = %.1f, %.1f, %.1f µT\r\n",
+                     test_field[0][0], test_field[0][1], test_field[0][2]);
+
+         Get_Coil_Field(0, 1.0f, test_field);
+         Debug_Print(LOG_LEVEL_INFO, "Coil 0 at I=1: sensor0 field = %.1f, %.1f, %.1f µT\r\n",
+                     test_field[0][0], test_field[0][1], test_field[0][2]);
+         // ---------- КОНЕЦ ВСТАВКИ ----------
+
     Debug_Print(LOG_LEVEL_INFO, "Initializing magnetic sensors...\r\n");
     Sensors_Init();
     system_state.sensors_enabled = 1;
 
-    // Инициализация QSPI Flash
     if (!QSPI_Flash_Init()) {
         Debug_Print(LOG_LEVEL_ERROR, "Failed to initialize QSPI Flash!\r\n");
-        // emergency_stop = 1; // Пример
     } else {
         Debug_Print(LOG_LEVEL_INFO, "QSPI Flash initialized.\r\n");
+        Check_QSPI();  // добавить эту строку
     }
-
-    // Загрузка калибровки из Flash (через функцию в sensor_mlx90393.c)
+    HAL_Delay(100);
     Debug_Print(LOG_LEVEL_INFO, "Loading calibration data...\r\n");
-    Load_Calibration_From_Flash(); // Вызов заглушки
-
-    // Запуск PWM для таймеров (если используются для катушек в будущем)
-    // HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // Пример
-    // HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-    // и т.д.
+    Load_Calibration_From_Flash();
 
     Debug_Print(LOG_LEVEL_INFO, "System initialization complete.\r\n");
 }
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == USART2) {
-        // существующий обработчик для консоли
-        // ...
-    }
-    else if (huart->Instance == USART3) {
-        // Здесь мы получаем по одному байту, т.к. запустили Receive_IT с размером 1
-        static uint8_t byte;
-        // byte уже прочитан? Нет, мы его получили через аргумент? В HAL_UART_RxCpltCallback нет данных.
-        // Лучше использовать HAL_UARTEx_RxEventCallback или просто запускать приём одного байта и сохранять в глобальной переменной.
-    }
-}
+
+// FIX: Убрали второй обработчик HAL_UART_RxCpltCallback, оставим один позже
+// Пока убираем этот блок (он дублируется)
+
 void Process_IMU_Byte(uint8_t byte)
 {
     switch (imu_rx_state) {
@@ -216,26 +201,25 @@ void Process_IMU_Byte(uint8_t byte)
                 imu_rx_state = RECEIVING_DATA;
                 imu_temp_idx = 0;
             } else {
-                imu_rx_state = WAIT_FOR_AA; // сброс
+                imu_rx_state = WAIT_FOR_AA;
             }
             break;
         case RECEIVING_DATA:
             imu_temp_buf[imu_temp_idx++] = byte;
             if (imu_temp_idx >= IMU_PACKET_SIZE) {
-                // Пакет получен
-                // Копируем в глобальную структуру (под защитой, но в прерывании лучше минимизировать)
                 memcpy((void*)&last_imu_data, imu_temp_buf, IMU_PACKET_SIZE);
                 imu_packet_ready = 1;
-                imu_rx_state = WAIT_FOR_AA; // ждём следующий
+                imu_rx_state = WAIT_FOR_AA;
             }
             break;
     }
 }
+
 void Update_System_Status(void) {
     Update_Uptime();
     Calculate_CPU_Usage();
-    // Добавьте другие проверки статуса
 }
+
 void Check_QSPI(void) {
     uint32_t jedec_id = QSPI_Flash_ReadJEDECID();
     if (jedec_id != 0xFFFFFFFF && jedec_id != 0) {
@@ -244,15 +228,13 @@ void Check_QSPI(void) {
         Debug_Print(LOG_LEVEL_ERROR, "QSPI not responding! ID: 0x%08lX\r\n", jedec_id);
     }
 }
+
 void Calculate_CPU_Usage(void) {
     uint32_t current_time = HAL_GetTick();
     uint32_t elapsed = current_time - last_cpu_measure;
-    if(elapsed >= 1000) {  // Каждую секунду
-        // float total_cycles = (SystemCoreClock / 1000) * elapsed;  // Пример
-        // float usage = 100.0f - ((idle_counter * 100.0f) / total_cycles);
+    if(elapsed >= 1000) {
         float usage = 0.0f; // Заглушка
         system_state.cpu_usage_percent = usage;
-        // Debug_Print(LOG_LEVEL_DEBUG, "CPU usage: %.1f%%\r\n", usage); // Удалено
         idle_counter = 0;
         last_cpu_measure = current_time;
     }
@@ -262,13 +244,12 @@ void Update_Uptime(void) {
     system_state.system_uptime_ms = HAL_GetTick();
 }
 
-// Функция для отображения справки
 void Show_Help_Menu(void) {
     Debug_Print(LOG_LEVEL_INFO, "Available commands:\r\n");
     Debug_Print(LOG_LEVEL_INFO, "help - Show this menu\r\n");
     Debug_Print(LOG_LEVEL_INFO, "status - Show system status\r\n");
     Debug_Print(LOG_LEVEL_INFO, "sensor <idx> - Read sensor data\r\n");
-    Debug_Print(LOG_LEVEL_INFO, "calibrate [idx] - Calibrate sensor offset (all sensors if no index)");
+    Debug_Print(LOG_LEVEL_INFO, "calibrate [idx] - Calibrate sensor offset (all sensors if no index)\r\n");
     Debug_Print(LOG_LEVEL_INFO, "save_cal - Save calibration data to flash\r\n");
     Debug_Print(LOG_LEVEL_INFO, "load_cal - Load calibration data from flash\r\n");
     Debug_Print(LOG_LEVEL_INFO, "start_stream [interval_ms] - Start data streaming (default: 50 ms)\r\n");
@@ -276,20 +257,19 @@ void Show_Help_Menu(void) {
     Debug_Print(LOG_LEVEL_INFO, "levitate - Start levitation control\r\n");
     Debug_Print(LOG_LEVEL_INFO, "stop_levitate - Stop levitation control\r\n");
     Debug_Print(LOG_LEVEL_INFO, "set_target x y z - Set levitation target position\r\n");
-    Debug_Print(LOG_LEVEL_INFO, "calibrate <idx> - Calibrate sensor offset (remove magnets)");
-    Debug_Print(LOG_LEVEL_INFO, "read_cal <idx> - Read sensor with calibration applied");
-    Debug_Print(LOG_LEVEL_INFO, "read_raw <idx> - Read raw sensor data (with gain)");
+    Debug_Print(LOG_LEVEL_INFO, "read_cal <idx> - Read sensor with calibration applied\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "read_raw <idx> - Read raw sensor data (with gain)\r\n");
     Debug_Print(LOG_LEVEL_INFO, "test_coil <idx> <start> <end> <step> <duration_ms> - Run test on single coil\r\n");
     Debug_Print(LOG_LEVEL_INFO, "test_all <power> - Set all coils to power (-1..1)\r\n");
     Debug_Print(LOG_LEVEL_INFO, "test_group <mask> <power> - Set coils by bit mask (hex) to power\r\n");
     Debug_Print(LOG_LEVEL_INFO, "stop_test - Stop current coil test\r\n");
     Debug_Print(LOG_LEVEL_INFO, "coils_off - Turn off all coils\r\n");
 }
+
 void Show_Prompt(void) {
     HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n> ", 4, 10);
 }
 
-// Функция для отображения статуса
 void Show_System_Status(void) {
     Debug_Print(LOG_LEVEL_INFO, "System status:\r\n");
     Debug_Print(LOG_LEVEL_INFO, "Uptime: %lu ms\r\n", system_state.system_uptime_ms);
@@ -299,7 +279,8 @@ void Show_System_Status(void) {
     Debug_Print(LOG_LEVEL_INFO, "Calibration done: %d\r\n", system_state.calibration_done);
     Debug_Print(LOG_LEVEL_INFO, "Monitoring active: %d\r\n", system_state.monitoring_active);
     Debug_Print(LOG_LEVEL_INFO, "Levitation active: %d\r\n", system_state.levitation_active);
-    Debug_Print(LOG_LEVEL_INFO, "Ball position: X=%.2f, Y=%.2f, Z=%.2f\r\n", system_state.ball_position[0], system_state.ball_position[1], system_state.ball_position[2]);
+    Debug_Print(LOG_LEVEL_INFO, "Ball position: X=%.2f, Y=%.2f, Z=%.2f\r\n",
+                system_state.ball_position[0], system_state.ball_position[1], system_state.ball_position[2]);
 
     Get_Sensor_Stats_String(console_buffer, sizeof(console_buffer));
     Debug_Print(LOG_LEVEL_INFO, "%s\r\n", console_buffer);
@@ -313,12 +294,11 @@ void Stream_Sensor_Data(void) {
     }
     last_stream_time = current_time;
 
-    char buffer[128];  // достаточно для 5*3 чисел + время
+    char buffer[128];
     int len = snprintf(buffer, sizeof(buffer), "%lu", current_time);
 
     for (int i = 0; i < ACTIVE_SENSORS; i++) {
         if (sensors[i].is_connected) {
-            // Используем калиброванные значения
             float x = sensors[i].magnetic_field[0] + sensors[i].offset[0];
             float y = sensors[i].magnetic_field[1] + sensors[i].offset[1];
             float z = sensors[i].magnetic_field[2] + sensors[i].offset[2];
@@ -334,12 +314,93 @@ void Stream_Sensor_Data(void) {
     strcat(buffer, "\n");
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 10);
 }
+void Process_Coil_Calib_Data(uint8_t *buffer, uint32_t len) {
+    Debug_Print(LOG_LEVEL_INFO, "Processing %d bytes...\r\n", len);
 
-// --- Заглушки для HID ---
+    if (len != sizeof(CoilCalibData_t)) {
+        Debug_Print(LOG_LEVEL_ERROR, "Data size mismatch: expected %d, got %d\r\n",
+                    sizeof(CoilCalibData_t), len);
+        return;
+    }
+
+    CoilCalibHeader_t *hdr = (CoilCalibHeader_t*)buffer;
+    Debug_Print(LOG_LEVEL_INFO, "Signature: 0x%08X, Version: %d\r\n",
+                hdr->signature, hdr->version);
+
+    if (hdr->signature != COIL_CALIB_SIGNATURE) {
+        Debug_Print(LOG_LEVEL_ERROR, "Invalid signature\r\n");
+        return;
+    }
+    if (hdr->version != COIL_CALIB_VERSION) {
+        Debug_Print(LOG_LEVEL_ERROR, "Invalid version\r\n");
+        return;
+    }
+    if (hdr->num_coils != COIL_CALIB_NUM_COILS ||
+        hdr->num_sensors != COIL_CALIB_NUM_SENSORS ||
+        hdr->num_points != COIL_CALIB_NUM_POINTS) {
+        Debug_Print(LOG_LEVEL_ERROR, "Size mismatch: coils=%d, sensors=%d, points=%d\r\n",
+                    hdr->num_coils, hdr->num_sensors, hdr->num_points);
+        return;
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "Erasing sectors...\r\n");
+    for (uint32_t addr = COIL_CALIB_FLASH_ADDR; addr < COIL_CALIB_FLASH_ADDR + sizeof(CoilCalibData_t); addr += 4096) {
+        QSPI_Flash_EraseSector(addr);
+        Debug_Print(LOG_LEVEL_INFO, "Erased sector at 0x%06lX\r\n", addr);
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "Writing data to QSPI...\r\n");
+    QSPI_Flash_WriteBuffer(COIL_CALIB_FLASH_ADDR, buffer, sizeof(CoilCalibData_t));
+
+    Debug_Print(LOG_LEVEL_INFO, "Coil calibration saved to QSPI at 0x%06lX\r\n", COIL_CALIB_FLASH_ADDR);
+    HAL_UART_Transmit(&huart2, (uint8_t*)"OK\r\n", 4, 100);
+}
+void Receive_Coil_Calibration(void) {
+    uint8_t buffer[sizeof(CoilCalibData_t)];
+    Debug_Print(LOG_LEVEL_INFO, "Ready to receive %d bytes...\r\n", sizeof(buffer));
+
+    // Принудительно ждём, пока UART освободится
+    HAL_Delay(100);
+
+    // Очищаем возможные остаточные данные в UART (если есть)
+    __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_PEF | UART_CLEAR_FEF);
+
+    HAL_StatusTypeDef status = HAL_UART_Receive(&huart2, buffer, sizeof(buffer), 10000);
+    if (status != HAL_OK) {
+        Debug_Print(LOG_LEVEL_ERROR, "UART receive error: %d\r\n", status);
+        return;
+    }
+
+    // Проверка сигнатуры
+    CoilCalibHeader_t *hdr = (CoilCalibHeader_t*)buffer;
+    if (hdr->signature != COIL_CALIB_SIGNATURE) {
+        Debug_Print(LOG_LEVEL_ERROR, "Invalid signature: expected 0x%08X, got 0x%08X\r\n",
+                    COIL_CALIB_SIGNATURE, hdr->signature);
+        return;
+    }
+    if (hdr->version != COIL_CALIB_VERSION) {
+        Debug_Print(LOG_LEVEL_ERROR, "Invalid version: expected %d, got %d\r\n",
+                    COIL_CALIB_VERSION, hdr->version);
+        return;
+    }
+    if (hdr->num_coils != COIL_CALIB_NUM_COILS ||
+        hdr->num_sensors != COIL_CALIB_NUM_SENSORS ||
+        hdr->num_points != COIL_CALIB_NUM_POINTS) {
+        Debug_Print(LOG_LEVEL_ERROR, "Size mismatch\r\n");
+        return;
+    }
+
+    // Стираем сектора
+    for (uint32_t addr = COIL_CALIB_FLASH_ADDR; addr < COIL_CALIB_FLASH_ADDR + sizeof(CoilCalibData_t); addr += 4096) {
+        QSPI_Flash_EraseSector(addr);
+    }
+
+    // Записываем данные
+    QSPI_Flash_WriteBuffer(COIL_CALIB_FLASH_ADDR, buffer, sizeof(CoilCalibData_t));
+
+    Debug_Print(LOG_LEVEL_INFO, "Coil calibration saved to QSPI at 0x%06lX\r\n", COIL_CALIB_FLASH_ADDR);
+}
 void Calculate_3D_Position(void) {
-    // Заглушка: вычисление 3D позиции/ориентации шара на основе данных с датчиков
-    // и применение калибровки. Требует сложного алгоритма.
-    // Пока просто заполняем нулями.
     Joystick_Report.x = 0;
     Joystick_Report.y = 0;
     Joystick_Report.z = 0;
@@ -350,9 +411,7 @@ void Calculate_3D_Position(void) {
 }
 
 void Send_HID_Report(void) {
-    // Заглушка: вызов функции отправки отчета HID
-    // USBD_CUSTOM_HID_SendReport(&hUsbDeviceFS, (uint8_t*)&Joystick_Report, sizeof(Joystick_Report));
-    // Реализация требует настройки USB HID
+    // Заглушка
 }
 
 /* USER CODE END 0 */
@@ -365,7 +424,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-  HAL_Init();
+
   /* USER CODE END 1 */
 
   /* MPU Configuration--------------------------------------------------------*/
@@ -398,14 +457,12 @@ int main(void)
   MX_USART3_UART_Init();
   MX_QUADSPI_Init();
   MX_USB_DEVICE_Init();
+  MX_TIM6_Init();
+  HAL_TIM_Base_Start_IT(&htim6);
   /* USER CODE BEGIN 2 */
 
-  // Инициализация системы
   System_Init();
 
-  JSON_Init();
-
-  // Включаем прием по UART
   HAL_UART_Receive_IT(&huart2, &RxChar, 1);
 
   // Запуск ШИМ для всех катушек
@@ -423,19 +480,26 @@ int main(void)
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
+  HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1, 0); // TIM6 – высокий приоритет
+  HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
 
-  // Выводим приветствие
+  // Приоритеты DMA (уже должны быть установлены в HAL_SPI_MspInit, но можно переназначить)
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 2, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 2, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
+
+  Stop_All_Coils();
+
   Debug_Print(LOG_LEVEL_INFO, "\r\n");
   Debug_Print(LOG_LEVEL_INFO, "========================================\r\n");
   Debug_Print(LOG_LEVEL_INFO, "   MAGNETIC MANIPULATOR CONTROL SYSTEM\r\n");
   Debug_Print(LOG_LEVEL_INFO, "   Version: 2.0 Cleaned | Coils: %d | Sensors: %d\r\n", NUM_COILS, NUM_SENSORS);
   Debug_Print(LOG_LEVEL_INFO, "========================================\r\n\r\n");
 
-  // Показываем помощь
   Show_Help_Menu();
   HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n> ", 4, 10);
 
-  // Запускаем системный таймер
   last_monitor_time = HAL_GetTick();
   last_cpu_measure = HAL_GetTick();
 
@@ -448,66 +512,77 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+      // Управление левитацией по таймеру (1 мс)
+      if (control_tick)
+      {
+          control_tick = 0;
+          if (system_state.levitation_active)
+          {
+              float orientation[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // временно без IMU
+              EstimateBallPosition(system_state.ball_position, orientation);
+              Debug_Print(LOG_LEVEL_INFO, "Pos: (%.1f,%.1f,%.1f)\n",
+                          system_state.ball_position[0],
+                          system_state.ball_position[1],
+                          system_state.ball_position[2]);
+              Apply_Levitation_Control();
+          }
+      }
 
-    // Обработка команд
-    Process_Console_Commands();
-    // Периодическое обновление датчиков
-        static uint32_t last_sensor_read = 0;
-        uint32_t now = HAL_GetTick();
-        if (now - last_sensor_read >= 20) {
-            for (int i = 0; i < ACTIVE_SENSORS; i++) {
-                if (sensors[i].is_connected) {
-                    Read_Sensor_With_Gain(i);
-                }
-            }
-            last_sensor_read = now;
-        }
-        if (imu_packet_ready) {
-            imu_packet_ready = 0;
-            static uint32_t last_print = 0;
-            uint32_t now = HAL_GetTick();
-            if (now - last_print > 1000) {
-                last_print = now;
-                Debug_Print(LOG_LEVEL_INFO, "IMU seq=%u r=%d p=%d y=%d\n",
-                           last_imu_data.sequence,
-                           last_imu_data.roll,
-                           last_imu_data.pitch,
-                           last_imu_data.yaw);
-            }
-        }
-    // Потоковая передача данных (если включена)
-    Stream_Sensor_Data();
+      // Обработка команд консоли (вызывается при наличии new_command)
+      Process_Console_Commands();
 
-    static uint32_t last_control_time = 0;
-    if (system_state.levitation_active && (now - last_control_time >= 1)) {
-    	EstimateBallPosition(system_state.ball_position, current_orientation);
-        Apply_Levitation_Control();
-        last_control_time = now;
-    }
+      // Потоковая передача данных (если включена)
+      Stream_Sensor_Data();
 
-    // Обновление статуса системы
-    Update_System_Status();
+      // Обновление системного статуса (раз в секунду)
+      Update_System_Status();
 
-    // --- Заглушка для HID ---
-    // static uint32_t last_hid_update = 0;
-    // const uint32_t hid_interval_ms = 10; // ~100 Hz
-    // if (HAL_GetTick() - last_hid_update >= hid_interval_ms) {
-    //     Calculate_3D_Position();
-    //     Send_HID_Report();
-    //     last_hid_update = HAL_GetTick();
-    // }
-    // --- Конец заглушки ---
-    // --- Обработка теста катушек ---
-    Process_Coil_Test();   // <-- добавить эту строку
-    // Небольшая задержка для стабильности
-    if(!streaming_active) {
-        HAL_Delay(1);
-    } else {
-        HAL_Delay(0); // Минимальная задержка при потоковой передаче
-    }
+      // Обработка теста катушек (если запущен)
+      Process_Coil_Test();
+
+      // Обновление датчиков через DMA
+          Update_Sensors_DMA();
+
+      // Чтение датчиков с периодом 5 мс
+      // static uint32_t last_sensor_read = 0;
+      // uint32_t now = HAL_GetTick();
+      // if (now - last_sensor_read >= 50)
+      // {
+         // for (int i = 0; i < ACTIVE_SENSORS; i++)
+          // {
+             // if (sensors[i].is_connected)
+              // {
+                 //  Read_Sensor_With_Gain(i);
+              //}
+          // }
+          //last_sensor_read = now;
+      // }
+
+      // Обработка данных IMU (редкий вывод)
+      if (imu_packet_ready)
+      {
+          imu_packet_ready = 0;
+          static uint32_t imu_counter = 0;
+          if (++imu_counter >= 100)
+          {
+              imu_counter = 0;
+              Debug_Print(LOG_LEVEL_INFO, "IMU seq=%u r=%d p=%d y=%d\n",
+                          last_imu_data.sequence,
+                          last_imu_data.roll,
+                          last_imu_data.pitch,
+                          last_imu_data.yaw);
+          }
+      }
   }
   /* USER CODE END 3 */
 }
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM6) {
+        control_tick = 1;
+    }
+}
+
 
 /**
   * @brief System Clock Configuration
@@ -569,54 +644,57 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-void Error_Handler(void) {
-    Debug_Print(LOG_LEVEL_ERROR, "Fatal error occurred! System halted.\r\n");
-    // Мигаем светодиодом (если есть, например, PC13)
-    while(1) {
-        // HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13); // Пример
-        HAL_Delay(500);
-    }
-}
-
+// FIX: ЕДИНСТВЕННЫЙ обработчик UART (объединяем USART2 и USART3)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART2) {
-        if (RxChar == '\r' || RxChar == '\n') {
-            if (command_index > 0) {
-                new_command = 1;
+        if (binary_rx_mode) {
+            // Режим приёма бинарных данных
+            if (binary_rx_index < binary_rx_total) {
+                binary_rx_buffer[binary_rx_index++] = RxChar;
             }
-            HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n", 2, 10);
-        } else if (RxChar == '\b' || RxChar == 127) {
-            if (command_index > 0) {
-                command_index--;
-                HAL_UART_Transmit(&huart2, (uint8_t*)"\b \b", 3, 10);
+            if (binary_rx_index >= binary_rx_total) {
+                // Приняли все данные – выходим из режима и запускаем сохранение
+                binary_rx_mode = 0;
+                // Сохраняем данные (можно вызвать функцию обработки)
+                Process_Coil_Calib_Data(binary_rx_buffer, binary_rx_total);
             }
-        } else if (command_index < sizeof(command_buffer) - 1) {
-            command_buffer[command_index++] = RxChar;
-            HAL_UART_Transmit(&huart2, &RxChar, 1, 10); // эхо
+        } else {
+            // Обычный режим командной строки
+            if (RxChar == '\r' || RxChar == '\n') {
+                if (command_index > 0) {
+                    new_command = 1;
+                }
+                HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n", 2, 10);
+            } else if (RxChar == '\b' || RxChar == 127) {
+                if (command_index > 0) {
+                    command_index--;
+                    HAL_UART_Transmit(&huart2, (uint8_t*)"\b \b", 3, 10);
+                }
+            } else if (command_index < sizeof(command_buffer) - 1) {
+                command_buffer[command_index++] = RxChar;
+                HAL_UART_Transmit(&huart2, &RxChar, 1, 10);
+            }
         }
         HAL_UART_Receive_IT(&huart2, &RxChar, 1);
     }
 }
 
+// FIX: ЕДИНСТВЕННЫЙ Error_Handler
+void Error_Handler(void) {
+    Debug_Print(LOG_LEVEL_ERROR, "Fatal error occurred! System halted.\r\n");
+    while(1) {
+        HAL_Delay(500);
+    }
+}
+
 void Process_Console_Commands(void) {
-	// Проверка на JSON (строка начинается с '{')
-	if (cmd_start[0] == '{') {
-	    JSON_ProcessCommand(cmd_start);
-	    // После обработки JSON не нужно показывать приглашение повторно?
-	    // Можно просто очистить буфер и вернуться.
-	    command_index = 0;
-	    memset(command_buffer, 0, sizeof(command_buffer));
-	    Show_Prompt();
-	    return;
-	}
     if (!new_command) return;
     new_command = 0;
 
-    // Null-terminate буфер
     command_buffer[command_index] = '\0';
     total_commands++;
 
-    // Удаляем пробельные символы в начале и конце (включая \r, \n)
+    // Удаляем пробелы в начале и конце
     char *cmd_start = (char*)command_buffer;
     while (*cmd_start == ' ' || *cmd_start == '\t' || *cmd_start == '\r' || *cmd_start == '\n')
         cmd_start++;
@@ -627,7 +705,6 @@ void Process_Console_Commands(void) {
         cmd_start[--len] = '\0';
     }
 
-    // Если после очистки строка пуста – просто показываем приглашение
     if (len == 0) {
         command_index = 0;
         memset(command_buffer, 0, sizeof(command_buffer));
@@ -635,7 +712,7 @@ void Process_Console_Commands(void) {
         return;
     }
 
-    // Разделяем команду и аргументы
+
     char *cmd = strtok(cmd_start, " ");
     if (cmd == NULL) {
         command_index = 0;
@@ -644,7 +721,6 @@ void Process_Console_Commands(void) {
         return;
     }
 
-    // === Обработка команд ===
     if (strcmp(cmd, "help") == 0) {
         Show_Help_Menu();
     }
@@ -653,14 +729,33 @@ void Process_Console_Commands(void) {
     }
     else if (strcmp(cmd, "coil") == 0) {
         char *idx_str = strtok(NULL, " ");
-        char *pwr_str = strtok(NULL, " ");
-        if (idx_str && pwr_str) {
+        char *power_str = strtok(NULL, " ");
+        if (idx_str && power_str) {
             int idx = atoi(idx_str);
-            float pwr = atof(pwr_str);
+            float power = atof(power_str);
             if (idx >= 0 && idx < NUM_COILS) {
-                Set_Coil_Power(idx, pwr);
+                Set_Coil_Power(idx, power);
+                Debug_Print(LOG_LEVEL_INFO, "Coil %d set to %.2f\r\n", idx, power);
+            } else {
+                Debug_Print(LOG_LEVEL_ERROR, "Invalid coil index\r\n");
             }
+        } else {
+            Debug_Print(LOG_LEVEL_ERROR, "Usage: coil <idx> <power>\r\n");
         }
+    }
+    else if (strcmp(cmd, "coil_all") == 0) {
+        char *power_str = strtok(NULL, " ");
+        if (power_str) {
+            float power = atof(power_str);
+            Set_All_Coils_Power(power);
+            Debug_Print(LOG_LEVEL_INFO, "All coils set to %.2f\r\n", power);
+        } else {
+            Debug_Print(LOG_LEVEL_ERROR, "Usage: coil_all <power>\r\n");
+        }
+    }
+    else if (strcmp(cmd, "coil_off") == 0) {
+        Stop_All_Coils();
+        Debug_Print(LOG_LEVEL_INFO, "All coils turned off\r\n");
     }
     else if (strcmp(cmd, "sensor") == 0) {
         char *arg = strtok(NULL, " ");
@@ -671,7 +766,7 @@ void Process_Console_Commands(void) {
             if (idx < 0 || idx >= NUM_SENSORS) {
                 Debug_Print(LOG_LEVEL_ERROR, "Invalid sensor index\r\n");
             } else {
-                Read_Sensor_Calibrated(idx);  // показывает калиброванные значения
+                Read_Sensor_Calibrated(idx);
             }
         }
     }
@@ -688,7 +783,6 @@ void Process_Console_Commands(void) {
             float step = atof(step_str);
             uint32_t dur = atoi(dur_str);
             if (idx >= 0 && idx < NUM_COILS) {
-                // Выключаем все остальные катушки
                 for (int i = 0; i < NUM_COILS; i++) {
                     if (i != idx) Set_Coil_Power(i, 0.0f);
                 }
@@ -715,7 +809,7 @@ void Process_Console_Commands(void) {
         char *mask_str = strtok(NULL, " ");
         char *power_str = strtok(NULL, " ");
         if (mask_str && power_str) {
-            uint32_t mask = strtoul(mask_str, NULL, 0);  // поддерживает hex (0x00F)
+            uint32_t mask = strtoul(mask_str, NULL, 0);
             float power = atof(power_str);
             for (int i = 0; i < NUM_COILS; i++) {
                 if (mask & (1 << i)) {
@@ -764,13 +858,12 @@ void Process_Console_Commands(void) {
         }
     }
     else if (strcmp(cmd, "set_pid_pos") == 0) {
-        // set_pid_pos axis Kp Ki Kd
         char *axis_str = strtok(NULL, " ");
         char *kp_str = strtok(NULL, " ");
         char *ki_str = strtok(NULL, " ");
         char *kd_str = strtok(NULL, " ");
         if (axis_str && kp_str && ki_str && kd_str) {
-            int axis = atoi(axis_str); // 0:X,1:Y,2:Z
+            int axis = atoi(axis_str);
             float kp = atof(kp_str);
             float ki = atof(ki_str);
             float kd = atof(kd_str);
@@ -783,15 +876,11 @@ void Process_Console_Commands(void) {
         }
     }
     else if (strcmp(cmd, "set_pid_ori") == 0) {
-        // аналогично для ориентации (0:roll,1:pitch,2:yaw)
-    }
-    else if (strcmp(cmd, "set_target") == 0) {
-        // уже есть
+        // TODO: добавить аналогично
     }
     else if (strcmp(cmd, "calibrate") == 0) {
         char *arg = strtok(NULL, " ");
         if (!arg) {
-            // калибруем все датчики
             Debug_Print(LOG_LEVEL_INFO, "Calibrating all active sensors...\r\n");
             for (int i = 0; i < ACTIVE_SENSORS; i++) {
                 if (sensors[i].is_connected) {
@@ -834,6 +923,15 @@ void Process_Console_Commands(void) {
     else if (strcmp(cmd, "stop_levitate") == 0) {
         Stop_Levitation();
     }
+    else if (strcmp(cmd, "flash_coil") == 0) {
+        Debug_Print(LOG_LEVEL_INFO, "Ready to receive %d bytes...\r\n", sizeof(CoilCalibData_t));
+        // Подготавливаем приём бинарных данных
+        binary_rx_mode = 1;
+        binary_rx_index = 0;
+        binary_rx_total = sizeof(CoilCalibData_t);
+        // Отправляем подтверждение готовности
+        HAL_UART_Transmit(&huart2, (uint8_t*)"G", 1, 100);
+    }
     else if (strcmp(cmd, "set_target") == 0) {
         char *x_str = strtok(NULL, " ");
         char *y_str = strtok(NULL, " ");
@@ -852,13 +950,10 @@ void Process_Console_Commands(void) {
         Debug_Print(LOG_LEVEL_INFO, "Try 'help' for available commands\r\n");
     }
 
-    // Сброс буфера и вывод приглашения
     command_index = 0;
     memset(command_buffer, 0, sizeof(command_buffer));
     Show_Prompt();
 }
-
-
 /* USER CODE END 4 */
 
  /* MPU Configuration */
@@ -894,16 +989,7 @@ void MPU_Config(void)
   * @brief  This function is executed in case of error occurrence.
   * @retval None
   */
-void Error_Handler(void)
-{
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-  }
-  /* USER CODE END Error_Handler_Debug */
-}
+
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number

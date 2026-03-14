@@ -1,10 +1,10 @@
-#ifndef __DEBUG_CONSOLE_H
-#define __DEBUG_CONSOLE_H
+#ifndef DEBUG_CONSOLE_H
+#define DEBUG_CONSOLE_H
 
 #include "main.h"
 #include <stdarg.h>
 
-// Уровни логирования
+// Уровни логирования (оставьте как есть)
 typedef enum {
     LOG_LEVEL_ERROR = 0,
     LOG_LEVEL_WARNING,
@@ -13,7 +13,7 @@ typedef enum {
     LOG_LEVEL_VERBOSE
 } LogLevel_t;
 
-// Форматы вывода
+// Форматы вывода (оставьте как есть)
 typedef enum {
     FORMAT_HUMAN = 0,
     FORMAT_CSV,
@@ -21,26 +21,28 @@ typedef enum {
     FORMAT_BINARY
 } OutputFormat_t;
 
-// Прототипы функций
-void Debug_Init(UART_HandleTypeDef* huart);
-void Debug_Print(LogLevel_t level, const char* format, ...);
-void Debug_Print_Raw(const char* format, ...);
-void Debug_Set_Log_Level(LogLevel_t level);
-void Debug_Set_Output_Format(OutputFormat_t format);
+// ---------- КЛЮЧЕВАЯ ЧАСТЬ: условное отключение ----------
+#ifndef DEBUG_ENABLED
+    #define DEBUG_ENABLED 1   // по умолчанию отладка выключена
+#endif
 
-// Командная консоль
-void Console_Process_Command(const char* command);
-void Console_Show_Help(void);
-void Console_Show_Status(void);
+#if DEBUG_ENABLED
+    // Режим отладки включён – объявляем реальные функции
+    void Debug_Init(UART_HandleTypeDef* huart);
+    void Debug_Print(LogLevel_t level, const char* format, ...);
+    void Debug_Set_Log_Level(LogLevel_t level);
+    void Debug_Set_Output_Format(OutputFormat_t format);
+    // ... остальные прототипы
+#else
+    // Режим отладки выключен – все функции пустые (статические inline, чтобы избежать множественных определений)
+    static inline void Debug_Init(UART_HandleTypeDef* huart) { (void)huart; }
+    static inline void Debug_Print(LogLevel_t level, const char* format, ...) { (void)level; (void)format; }
+    static inline void Debug_Set_Log_Level(LogLevel_t level) { (void)level; }
+    static inline void Debug_Set_Output_Format(OutputFormat_t format) { (void)format; }
+    // ... аналогично для остальных функций
+#endif
 
-// Мониторинг в реальном времени
-void Start_RealTime_Monitoring(uint32_t interval_ms);
-void Stop_RealTime_Monitoring(void);
-void Set_Monitoring_Interval(uint32_t interval_ms);
+// Остальные объявления (если есть) оставить как есть
+// ...
 
-// Экспорт данных
-void Export_Coil_Data_CSV(void);
-void Export_Sensor_Data_CSV(void);
-void Export_System_Log(void);
-
-#endif /* __DEBUG_CONSOLE_H */
+#endif /* DEBUG_CONSOLE_H */

@@ -79,16 +79,10 @@ typedef struct {
 #pragma pack(pop)
 
 // --- Определения для катушек (coil_driver.c) ---
-#define PWM_MAX_VALUE 999.0f // Максимальное значение PWM (например, ARR таймера)
+#define PWM_MAX_VALUE 2499.0f // Максимальное значение PWM (например, ARR таймера)
 #define OVERCURRENT_THRESHOLD 1000.0f // Порог тока в mA (примерное значение)
 
 // --- Определения PID (levitation_control.c) ---
-typedef enum {
-    MODE_IDLE,
-    MODE_CALIBRATION,
-    MODE_LEVITATION,
-    MODE_ERROR
-} OperationMode_t;
 
 typedef struct {
     // Позиция (X, Y, Z)
@@ -157,6 +151,5 @@ typedef enum {
     MODE_JOYSTICK_FREE_ROTATION, // свободное вращение
     MODE_ERROR
 } OperationMode_t;
-#define IMU_PACKET_SIZE 22
 
 #endif /* CONFIG_H */

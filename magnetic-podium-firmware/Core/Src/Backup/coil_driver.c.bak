@@ -70,13 +70,14 @@ void Coils_Init(void)
 
 void Set_Coil_Power(uint8_t coil_idx, float power)
 {
-	Debug_Print(LOG_LEVEL_INFO, "Set_Coil_Power(%d, %f)\r\n", coil_idx, power);
+	// Debug_Print(LOG_LEVEL_INFO, "Set_Coil_Power(%d, %f)\r\n", coil_idx, power);
     if (coil_idx >= NUM_COILS) return;
     if (coils[coil_idx].is_faulty) return;
 
     // Ограничение мощности
-    if (power > 1.0f) power = 1.0f;
-    if (power < -1.0f) power = -1.0f;
+    	float max_power = 3.0f;
+        if (power > max_power) power = max_power;
+        if (power < -max_power) power = -max_power;
 
     Coil_t *coil = &coils[coil_idx];
 

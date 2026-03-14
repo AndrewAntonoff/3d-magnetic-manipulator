@@ -21,9 +21,6 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "stm32h7xx_hal.h"
-#include "config.h"
-extern volatile IMU_Data_t last_imu_data;
-extern volatile uint8_t imu_packet_ready;
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */

@@ -33,7 +33,14 @@ typedef struct {
     uint32_t total_reads;
     uint32_t failed_reads;
     float average_read_time_ms;
+
+    // Поля для DMA
+    volatile uint8_t dma_state;      // 0 - свободен, 1 - занят, 2 - данные готовы
+    uint32_t dma_start_tick;          // время начала последней DMA-передачи
+    uint8_t tx_dma[32] __attribute__((aligned(32)));  // буфер для команды
+    uint8_t rx_dma[32] __attribute__((aligned(32)));  // буфер для приёма
 } MLX90393_t;
+
 
 // Глобальный массив датчиков (определён в .c)
 extern MLX90393_t sensors[NUM_SENSORS];
@@ -45,6 +52,13 @@ void Calibrate_Offset_Procedure(uint8_t sensor_idx);
 uint8_t Read_Sensor_Calibrated(uint8_t sensor_idx);
 void Save_Calibration_To_Flash(void);
 void Load_Calibration_From_Flash(void);
+
+// DMA
+
+void Update_Sensors_DMA(void);
+uint8_t Read_Sensor_DMA_Start(uint8_t sensor_idx);
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi); // если хотите явно объявить
+
 
 // Вспомогательные (опционально)
 uint8_t Test_Sensor_Connection(uint8_t sensor_idx);

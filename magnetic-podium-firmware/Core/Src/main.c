@@ -19,12 +19,12 @@ If no LICENSE file comes with this software, it is provided AS-IS.
 #include "usart.h"
 #include "usb_device.h"
 #include "gpio.h"
+#include "config.h"
 #include "debug_console.h"
 #include "coil_driver.h"
 #include "levitation_control.h"
 #include "sensor_mlx90393.h"
 #include "qspi_flash.h"
-#include "usbd_custom_hid_if.h"
 #include "coil_calib.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -49,6 +49,7 @@ static uint32_t binary_rx_total = 0;
 static ImuRxState_t imu_rx_state = WAIT_FOR_AA;
 static uint8_t imu_temp_buf[IMU_PACKET_SIZE];
 static uint8_t imu_temp_idx;
+volatile uint8_t control_tick = 0;
 
 // FIX: Определяем глобальные переменные для IMU (они объявлены как extern в main.h)
 volatile IMU_Data_t last_imu_data;
@@ -105,16 +106,13 @@ HID_JoystickReport_TypeDef Joystick_Report = {0};
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+
 /* USER CODE BEGIN PV */
 
 // Внешняя переменная для датчиков
 extern MLX90393_t sensors[NUM_SENSORS];
 
 /* USER CODE END PV */
-
-// FIX: Объявляем внешние переменные из других модулей
-extern SystemState_t system_state;
-extern PID_6DOF_t pid_controller;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -144,6 +142,7 @@ void Get_Sensor_Stats_String(char *buffer, uint16_t buffer_size);
 void Receive_Coil_Calibration(void);
 void Process_Coil_Calib_Data(uint8_t *buffer, uint32_t len);
 uint8_t Test_Sensor_Connection(uint8_t sensor_idx);
+void Check_QSPI(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -151,6 +150,7 @@ uint8_t Test_Sensor_Connection(uint8_t sensor_idx);
 
 // Инициализация системы
 void System_Init(void) {
+
     Debug_Init(&huart2);
     Debug_Print(LOG_LEVEL_INFO, "=== Magnetic Manipulator System Initialization ===\r\n");
 
@@ -160,6 +160,17 @@ void System_Init(void) {
      Initialize_Sensor_Geometry();   // <-- добавить эту строку
      Load_Coil_Calibration();
 
+     // ---------- НАЧАЛО ВСТАВКИ: проверка калибровки катушек ----------
+         float test_field[5][3];
+         Get_Coil_Field(0, 0.0f, test_field);
+         Debug_Print(LOG_LEVEL_INFO, "Coil 0 at I=0: sensor0 field = %.1f, %.1f, %.1f µT\r\n",
+                     test_field[0][0], test_field[0][1], test_field[0][2]);
+
+         Get_Coil_Field(0, 1.0f, test_field);
+         Debug_Print(LOG_LEVEL_INFO, "Coil 0 at I=1: sensor0 field = %.1f, %.1f, %.1f µT\r\n",
+                     test_field[0][0], test_field[0][1], test_field[0][2]);
+         // ---------- КОНЕЦ ВСТАВКИ ----------
+
     Debug_Print(LOG_LEVEL_INFO, "Initializing magnetic sensors...\r\n");
     Sensors_Init();
     system_state.sensors_enabled = 1;
@@ -168,8 +179,9 @@ void System_Init(void) {
         Debug_Print(LOG_LEVEL_ERROR, "Failed to initialize QSPI Flash!\r\n");
     } else {
         Debug_Print(LOG_LEVEL_INFO, "QSPI Flash initialized.\r\n");
+        Check_QSPI();  // добавить эту строку
     }
-
+    HAL_Delay(100);
     Debug_Print(LOG_LEVEL_INFO, "Loading calibration data...\r\n");
     Load_Calibration_From_Flash();
 
@@ -411,14 +423,31 @@ void Send_HID_Report(void) {
   */
 int main(void)
 {
-  HAL_Init();
 
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MPU Configuration--------------------------------------------------------*/
   MPU_Config();
 
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
   SystemClock_Config();
 
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_SPI1_Init();
@@ -429,11 +458,16 @@ int main(void)
   MX_USART3_UART_Init();
   MX_QUADSPI_Init();
   MX_USB_DEVICE_Init();
-
+  MX_TIM6_Init();
+  HAL_TIM_Base_Start_IT(&htim6);
   /* USER CODE BEGIN 2 */
 
   System_Init();
-
+  HAL_Delay(500); // дать время всей периферии стабилизироваться
+  for (int i = 0; i < 5; i++) {
+      Update_Sensors_DMA(); // принудительно "прогнать" автомат
+      HAL_Delay(10);
+  }
   HAL_UART_Receive_IT(&huart2, &RxChar, 1);
 
   // Запуск ШИМ для всех катушек
@@ -451,6 +485,16 @@ int main(void)
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
+  HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1, 0); // TIM6 – высокий приоритет
+  HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
+
+  // Приоритеты DMA (уже должны быть установлены в HAL_SPI_MspInit, но можно переназначить)
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 2, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 2, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
+
+  Stop_All_Coils();
 
   Debug_Print(LOG_LEVEL_INFO, "\r\n");
   Debug_Print(LOG_LEVEL_INFO, "========================================\r\n");
@@ -466,82 +510,76 @@ int main(void)
 
   /* USER CODE END 2 */
 
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
   while (1)
   {
-    uint32_t now = HAL_GetTick();
+    /* USER CODE END WHILE */
 
-    Process_Console_Commands();
+    /* USER CODE BEGIN 3 */
+      // Управление левитацией по таймеру (1 мс)
+      if (control_tick)
+      {
+          control_tick = 0;
+          if (system_state.levitation_active)
+          {
+              float orientation[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // временно без IMU
+              EstimateBallPosition(system_state.ball_position, orientation);
+              // Debug_Print(LOG_LEVEL_INFO, "Pos: (%.1f,%.1f,%.1f)\n",
+                         // system_state.ball_position[0],
+                          // system_state.ball_position[1],
+                          // system_state.ball_position[2]);
+              Apply_Levitation_Control();
+          }
+      }
 
-    static uint32_t last_sensor_read = 0;
-    if (now - last_sensor_read >= 20) {
-        for (int i = 0; i < ACTIVE_SENSORS; i++) {
-            if (sensors[i].is_connected) {
-                Read_Sensor_With_Gain(i);
-            }
-        }
-        last_sensor_read = now;
-    }
+      // Обработка команд консоли (вызывается при наличии new_command)
+      Process_Console_Commands();
 
-    if (imu_packet_ready) {
-        imu_packet_ready = 0;
-        // Вывод каждого пакета для отладки (можно закомментировать после проверки)
-        Debug_Print(LOG_LEVEL_INFO, "IMU pkt: seq=%u, accel=%d,%d,%d, gyro=%d,%d,%d, roll=%d, pitch=%d, yaw=%d, batt=%u\n",
-                    last_imu_data.sequence,
-                    last_imu_data.accel_x, last_imu_data.accel_y, last_imu_data.accel_z,
-                    last_imu_data.gyro_x, last_imu_data.gyro_y, last_imu_data.gyro_z,
-                    last_imu_data.roll, last_imu_data.pitch, last_imu_data.yaw,
-                    last_imu_data.battery);
-        // Оставляем и периодический вывод (раз в секунду)
-        static uint32_t last_print = 0;
-        uint32_t now = HAL_GetTick();
-        if (now - last_print > 1000) {
-            last_print = now;
-            Debug_Print(LOG_LEVEL_INFO, "IMU seq=%u r=%d p=%d y=%d\n",
-                       last_imu_data.sequence,
-                       last_imu_data.roll,
-                       last_imu_data.pitch,
-                       last_imu_data.yaw);
-        }
-    }
+      // Потоковая передача данных (если включена)
+      Stream_Sensor_Data();
 
-    Stream_Sensor_Data();
+      // Обновление системного статуса (раз в секунду)
+      Update_System_Status();
 
-    static uint32_t last_control_time = 0;
-    if (system_state.levitation_active && (now - last_control_time >= 1)) {
-        // FIX: Определяем массив для ориентации (пока нулевой)
-        float current_orientation[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // единичный кватернион
-        EstimateBallPosition(system_state.ball_position, current_orientation);
-        Apply_Levitation_Control();
-        last_control_time = now;
-    }
-    static uint32_t last_levitation_print = 0;
-    if (system_state.levitation_active && (now - last_levitation_print > 200)) {
-        last_levitation_print = now;
-        Debug_Print(LOG_LEVEL_INFO,
-                    "Pos: (%.1f,%.1f,%.1f) Target: (%.1f,%.1f,%.1f) Err: (%.1f,%.1f,%.1f) PID out: (%.3f,%.3f,%.3f)\n",
-                    system_state.ball_position[0],
-                    system_state.ball_position[1],
-                    system_state.ball_position[2],
-                    pid_controller.setpoint_pos[0],
-                    pid_controller.setpoint_pos[1],
-                    pid_controller.setpoint_pos[2],
-                    pid_controller.setpoint_pos[0] - system_state.ball_position[0],
-                    pid_controller.setpoint_pos[1] - system_state.ball_position[1],
-                    pid_controller.setpoint_pos[2] - system_state.ball_position[2],
-                    pid_controller.output_pos[0],
-                    pid_controller.output_pos[1],
-                    pid_controller.output_pos[2]);
-    }
-    Update_System_Status();
+      // Обработка теста катушек (если запущен)
+      Process_Coil_Test();
 
-    Process_Coil_Test();
+      // Обновление датчиков через DMA
+          Update_Sensors_DMA();
 
-    if(!streaming_active) {
-        HAL_Delay(1);
-    } else {
-        HAL_Delay(0);
-    }
+      // Чтение датчиков с периодом 5 мс
+      // static uint32_t last_sensor_read = 0;
+      // uint32_t now = HAL_GetTick();
+      // if (now - last_sensor_read >= 50)
+      // {
+         // for (int i = 0; i < ACTIVE_SENSORS; i++)
+          // {
+             // if (sensors[i].is_connected)
+              // {
+                 //  Read_Sensor_With_Gain(i);
+              //}
+          // }
+          //last_sensor_read = now;
+      // }
+
+      // Обработка данных IMU (редкий вывод)
+      if (imu_packet_ready)
+      {
+          imu_packet_ready = 0;
+          static uint32_t imu_counter = 0;
+          if (++imu_counter >= 100)
+          {
+              imu_counter = 0;
+              Debug_Print(LOG_LEVEL_INFO, "IMU seq=%u r=%d p=%d y=%d\n",
+                          last_imu_data.sequence,
+                          last_imu_data.roll,
+                          last_imu_data.pitch,
+                          last_imu_data.yaw);
+          }
+      }
   }
+  /* USER CODE END 3 */
 }
 
 /**
@@ -553,10 +591,19 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
+  /** Supply configuration update enable
+  */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
+
+  /** Configure the main internal regulator output voltage
+  */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -574,6 +621,8 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
                               |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
@@ -596,6 +645,7 @@ void SystemClock_Config(void)
 // FIX: ЕДИНСТВЕННЫЙ обработчик UART (объединяем USART2 и USART3)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART2) {
+    	// Debug_Print(LOG_LEVEL_INFO, "UART RX: %d (0x%02X) '%c'\n", RxChar, RxChar, (RxChar >= 32 && RxChar < 127) ? RxChar : '.');
         if (binary_rx_mode) {
             // Режим приёма бинарных данных
             if (binary_rx_index < binary_rx_total) {
@@ -635,8 +685,14 @@ void Error_Handler(void) {
         HAL_Delay(500);
     }
 }
-
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM6) {
+        control_tick = 1;
+    }
+}
 void Process_Console_Commands(void) {
+	// Debug_Print(LOG_LEVEL_INFO, "PCC called\n");
     if (!new_command) return;
     new_command = 0;
 
@@ -669,6 +725,7 @@ void Process_Console_Commands(void) {
         Show_Prompt();
         return;
     }
+
 
     if (strcmp(cmd, "help") == 0) {
         Show_Help_Menu();
@@ -905,13 +962,17 @@ void Process_Console_Commands(void) {
 }
 /* USER CODE END 4 */
 
-/* MPU Configuration */
+ /* MPU Configuration */
+
 void MPU_Config(void)
 {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
 
+  /* Disables the MPU */
   HAL_MPU_Disable();
 
+  /** Initializes and configures the Region and the memory to be protected
+  */
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
@@ -925,5 +986,35 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
+  /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+
 }
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART2) {
+        HAL_UART_Receive_IT(&huart2, &RxChar, 1); // перезапуск приёма при ошибке
+    }
+}
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
