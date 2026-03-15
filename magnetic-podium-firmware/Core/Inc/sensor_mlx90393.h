@@ -56,6 +56,7 @@ void Load_Calibration_From_Flash(void);
 // DMA
 
 void Update_Sensors_DMA(void);
+void Sensors_Update(void);
 uint8_t Read_Sensor_DMA_Start(uint8_t sensor_idx);
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi); // если хотите явно объявить
 

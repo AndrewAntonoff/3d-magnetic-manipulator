@@ -1,6 +1,6 @@
 #include "levitation_control.h"
 #include "config.h"
-#include "main.h"          // для доступа к last_imu_data, imu_packet_ready
+#include "main.h"
 #include "coil_driver.h"
 #include "sensor_mlx90393.h"
 #include "debug_console.h"
@@ -13,12 +13,11 @@ extern MLX90393_t sensors[NUM_SENSORS];
 
 // Поле постоянного магнита (измерено без шара)
 static const float B_permanent[5][3] = {
-    {13076.9f, 2180.7f, 6859.3f},   // датчик 0 (уже)
+    {13076.9f, 2180.7f, 6859.3f},   // датчик 0 (центр дна)
     {10834.9f, 3748.3f, -15988.2f}, // датчик 1
     {17922.4f, -208.4f, -24747.2f}, // датчик 2
     {-10471.3f, -2354.4f, 21186.9f},// датчик 3
     {-6204.0f, 313.3f, 18233.3f}    // датчик 4
-
 };
 
 // ------------------------------------------------------------------
@@ -28,8 +27,8 @@ static const float B_permanent[5][3] = {
 #define HOME_Z          25.0f              // домашняя высота (мм)
 #define RELEASE_DIST_THRESH  2.0f          // порог расстояния для отпускания (мм)
 #define RELEASE_SPEED_THRESH 5.0f          // порог скорости (мм/с)
-#define K_FORCE 2.0f
-#define BALL_WEIGHT_N 1.7f   // вес шара в ньютонах (подберите по массе)
+#define K_FORCE 2.0f                       // общий коэффициент усиления силы
+#define BALL_WEIGHT_N 1.7f                  // вес шара в ньютонах (подберите по массе)
 
 // ------------------------------------------------------------------
 // Глобальные переменные
@@ -50,12 +49,16 @@ OperationMode_t current_mode = MODE_IDLE;
 // Геометрия катушек (в мм)
 static CoilGeometry_t coil_geometry[NUM_COILS];
 
+// Прототипы
 float PowerToCurrent(float power);
 
 // ------------------------------------------------------------------
 // Вспомогательные функции (математика поля)
 // ------------------------------------------------------------------
 
+/**
+ * Вычисляет силу и момент, действующие на диполь шара со стороны одной катушки.
+ */
 static void Compute_ForceTorque(uint8_t coil_idx, const float ball_pos[3],
                                 const float ball_moment[3],
                                 float force[3], float torque[3])
@@ -112,6 +115,9 @@ static void Compute_ForceTorque(uint8_t coil_idx, const float ball_pos[3],
     }
 }
 
+/**
+ * Заполнение матрицы A (6x12) для текущего положения и момента шара.
+ */
 static void Build_Matrix_A(const float ball_pos[3], const float ball_moment[3],
                            float A[6][12])
 {
@@ -125,6 +131,10 @@ static void Build_Matrix_A(const float ball_pos[3], const float ball_moment[3],
     }
 }
 
+/**
+ * Обращение матрицы 6x6 методом Гаусса-Жордана.
+ * Возвращает 1 при успехе, 0 если матрица вырождена.
+ */
 static int InvertMatrix_6x6(const float A[6][6], float inv[6][6])
 {
     double aug[6][12];
@@ -177,6 +187,9 @@ static int InvertMatrix_6x6(const float A[6][6], float inv[6][6])
     return 1;
 }
 
+/**
+ * Решение системы I = pinv(A) * u с регуляризацией.
+ */
 static void Solve_Currents(const float A[6][12], const float u[6],
                            float I[12], float lambda)
 {
@@ -218,6 +231,7 @@ static void Solve_Currents(const float A[6][12], const float u[6],
         }
     }
 
+    // Ограничение токов
     float max_abs = 0.0f;
     for (int k = 0; k < NUM_COILS; k++) {
         float abs_val = fabsf(I[k]);
@@ -296,11 +310,14 @@ void Initialize_Sensor_Geometry(void) {
     Debug_Print(LOG_LEVEL_INFO, "Sensor geometry OK (r=35 mm @ 45°)\r\n");
 }
 
+/**
+ * Улучшенная оценка позиции с вычитанием поля катушек и фильтрацией.
+ */
 void EstimateBallPosition(float ball_pos[3], const float orientation[4])
 {
     // 1. Скорректированные показания датчиков (вычитаем поле катушек)
     float corrected_field[ACTIVE_SENSORS][3];
-    float coil_field_cache[NUM_COILS][5][3];
+    float coil_field_cache[NUM_COILS][5][3]; // кэш полей для текущих токов
 
     float coil_currents[NUM_COILS];
     for (int c = 0; c < NUM_COILS; c++) {
@@ -416,7 +433,7 @@ void EstimateBallPosition(float ball_pos[3], const float orientation[4])
 // ПИД-регулятор (6 степеней свободы)
 // ------------------------------------------------------------------
 PID_6DOF_t pid_controller = {
-    .Kp_pos = {15.0f, 12.0f, 1.5f},   // Z увеличено
+    .Kp_pos = {15.0f, 12.0f, 1.5f},   // X, Y, Z
     .Ki_pos = {0.001f, 0.001f, 0.01f},
     .Kd_pos = {8.0f, 8.0f, 0.05f},
     .integral_pos = {0},
@@ -516,7 +533,7 @@ void Calculate_Coil_Forces(float fx, float fy, float fz,
                          system_state.ball_position[1],
                          system_state.ball_position[2]};
 
-    // Магнитный момент шара (калиброванный, подставьте свой)
+    // Магнитный момент шара (подобран экспериментально, при необходимости замените)
     float ball_moment[3] = {-15.0f, -6.0f, 8.0f};
     float A[6][12];
     Build_Matrix_A(ball_pos, ball_moment, A);
@@ -581,7 +598,7 @@ void Apply_Levitation_Control(void)
     float ty = pid_controller.output_ori[1];
     float tz = pid_controller.output_ori[2];
 
-    // Ограничения (увеличены для горизонтали)
+    // Ограничения
     if (fabsf(fx) > 5.0f) fx = 5.0f * (fx > 0 ? 1.0f : -1.0f);
     if (fabsf(fy) > 5.0f) fy = 5.0f * (fy > 0 ? 1.0f : -1.0f);
     if (fabsf(fz) > 5.0f) fz = 5.0f * (fz > 0 ? 1.0f : -1.0f);
@@ -591,11 +608,11 @@ void Apply_Levitation_Control(void)
 
     // Мониторинг максимального тока
     static uint32_t current_monitor_counter = 0;
-    if (++current_monitor_counter >= 200) {
+    if (++current_monitor_counter >= 200) {   // раз в 200 циклов
         current_monitor_counter = 0;
         float max_current_rel = 0.0f;
         for (int i = 0; i < NUM_COILS; i++) {
-            float abs_current = fabsf(coil_powers[i]);
+            float abs_current = fabsf(coil_powers[i]);   // в относительных единицах
             if (abs_current > max_current_rel) max_current_rel = abs_current;
         }
         float max_current_amp = max_current_rel * COIL_MAX_CURRENT;
@@ -610,6 +627,7 @@ void Apply_Levitation_Control(void)
         coil_powers[i] = filtered_coil_powers[i];
     }
 
+    // Применяем
     for (int i = 0; i < NUM_COILS; i++) {
         Set_Coil_Power(i, coil_powers[i]);
     }
@@ -626,7 +644,7 @@ void Apply_Levitation_Control(void)
     last_time = current_time;
 
     uint32_t t_end = HAL_GetTick();
-    if (t_end - last_profile > 1000) {
+    if (t_end - last_profile > 1000) { // раз в секунду
         last_profile = t_end;
         Debug_Print(LOG_LEVEL_INFO, "ALC time: %lu ms\n", t_end - t_start);
     }
@@ -687,7 +705,9 @@ void Get_Levitation_Status(char* buffer, uint16_t buffer_size)
              pid_controller.output_pos[0], pid_controller.output_pos[1], pid_controller.output_pos[2]);
 }
 
-// Таблица калибровки тока
+// ------------------------------------------------------------------
+// Таблица калибровки тока для нелинейного преобразования
+// ------------------------------------------------------------------
 #define NUM_CALIB_POINTS 9
 static const float calib_power[NUM_CALIB_POINTS] = {0.1f, 0.2f, 0.3f, 0.4f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f};
 static const float calib_current[NUM_CALIB_POINTS] = {0.01f, 0.052f, 0.123f, 0.228f, 0.557f, 0.732f, 0.925f, 1.4f, 1.78f};
@@ -696,12 +716,15 @@ float PowerToCurrent(float power) {
     float abs_power = fabsf(power);
     float current = 0.0f;
 
+    // Экстраполяция для малых значений (ниже 0.1)
     if (abs_power <= calib_power[0]) {
         current = calib_current[0] * (abs_power / calib_power[0]);
     }
+    // Экстраполяция для больших значений (выше 1.0) – не должно быть, но на всякий случай
     else if (abs_power >= calib_power[NUM_CALIB_POINTS-1]) {
         current = calib_current[NUM_CALIB_POINTS-1];
     }
+    // Интерполяция между точками
     else {
         for (int i = 0; i < NUM_CALIB_POINTS - 1; i++) {
             if (abs_power >= calib_power[i] && abs_power <= calib_power[i+1]) {
