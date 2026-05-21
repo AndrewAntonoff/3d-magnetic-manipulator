@@ -5,8 +5,8 @@
 
 #define COIL_CALIB_SIGNATURE 0xCAFEBABE
 #define COIL_CALIB_VERSION   1
-#define COIL_CALIB_NUM_COILS   12
-#define COIL_CALIB_NUM_SENSORS 5
+#define COIL_CALIB_NUM_COILS   8
+#define COIL_CALIB_NUM_SENSORS 8
 #define COIL_CALIB_NUM_POINTS  13
 #define COIL_CALIB_FLASH_ADDR  0x00010000
 
@@ -25,6 +25,6 @@ typedef struct {
 } CoilCalibData_t;
 
 void Load_Coil_Calibration(void);
-void Get_Coil_Field(uint8_t coil, float I, float field[5][3]);
+void Get_Coil_Field(uint8_t coil, float I, float field[COIL_CALIB_NUM_SENSORS][3]);
 
 #endif

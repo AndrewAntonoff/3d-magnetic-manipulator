@@ -47,6 +47,9 @@ EndBSPDependencies */
 #include "usbd_hid.h"
 #include "usbd_ctlreq.h"
 
+uint8_t HID_Feature_Buffer[32];
+extern void Process_Feature_Report(uint8_t *data);
+
 
 /** @addtogroup STM32_USB_DEVICE_LIBRARY
   * @{
@@ -91,6 +94,7 @@ static uint8_t USBD_HID_Init(USBD_HandleTypeDef *pdev, uint8_t cfgidx);
 static uint8_t USBD_HID_DeInit(USBD_HandleTypeDef *pdev, uint8_t cfgidx);
 static uint8_t USBD_HID_Setup(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *req);
 static uint8_t USBD_HID_DataIn(USBD_HandleTypeDef *pdev, uint8_t epnum);
+static uint8_t USBD_HID_EP0_RxReady(USBD_HandleTypeDef *pdev);
 #ifndef USE_USBD_COMPOSITE
 static uint8_t *USBD_HID_GetFSCfgDesc(uint16_t *length);
 static uint8_t *USBD_HID_GetHSCfgDesc(uint16_t *length);
@@ -111,7 +115,7 @@ USBD_ClassTypeDef USBD_HID =
   USBD_HID_DeInit,
   USBD_HID_Setup,
   NULL,              /* EP0_TxSent */
-  NULL,              /* EP0_RxReady */
+  USBD_HID_EP0_RxReady,              /* EP0_RxReady */
   USBD_HID_DataIn,   /* DataIn */
   NULL,              /* DataOut */
   NULL,              /* SOF */
@@ -217,47 +221,8 @@ __ALIGN_BEGIN static uint8_t USBD_HID_DeviceQualifierDesc[USB_LEN_DEV_QUALIFIER_
 };
 #endif /* USE_USBD_COMPOSITE  */
 
-__ALIGN_BEGIN static uint8_t HID_MOUSE_ReportDesc[HID_MOUSE_REPORT_DESC_SIZE] __ALIGN_END =
-{
-  0x05, 0x01,        /* Usage Page (Generic Desktop Ctrls)     */
-  0x09, 0x02,        /* Usage (Mouse)                          */
-  0xA1, 0x01,        /* Collection (Application)               */
-  0x09, 0x01,        /*   Usage (Pointer)                      */
-  0xA1, 0x00,        /*   Collection (Physical)                */
-  0x05, 0x09,        /*     Usage Page (Button)                */
-  0x19, 0x01,        /*     Usage Minimum (0x01)               */
-  0x29, 0x03,        /*     Usage Maximum (0x03)               */
-  0x15, 0x00,        /*     Logical Minimum (0)                */
-  0x25, 0x01,        /*     Logical Maximum (1)                */
-  0x95, 0x03,        /*     Report Count (3)                   */
-  0x75, 0x01,        /*     Report Size (1)                    */
-  0x81, 0x02,        /*     Input (Data,Var,Abs)               */
-  0x95, 0x01,        /*     Report Count (1)                   */
-  0x75, 0x05,        /*     Report Size (5)                    */
-  0x81, 0x01,        /*     Input (Const,Array,Abs)            */
-  0x05, 0x01,        /*     Usage Page (Generic Desktop Ctrls) */
-  0x09, 0x30,        /*     Usage (X)                          */
-  0x09, 0x31,        /*     Usage (Y)                          */
-  0x09, 0x38,        /*     Usage (Wheel)                      */
-  0x15, 0x81,        /*     Logical Minimum (-127)             */
-  0x25, 0x7F,        /*     Logical Maximum (127)              */
-  0x75, 0x08,        /*     Report Size (8)                    */
-  0x95, 0x03,        /*     Report Count (3)                   */
-  0x81, 0x06,        /*     Input (Data,Var,Rel)               */
-  0xC0,              /*   End Collection                       */
-  0x09, 0x3C,        /*   Usage (Motion Wakeup)                */
-  0x05, 0xFF,        /*   Usage Page (Reserved 0xFF)           */
-  0x09, 0x01,        /*   Usage (0x01)                         */
-  0x15, 0x00,        /*   Logical Minimum (0)                  */
-  0x25, 0x01,        /*   Logical Maximum (1)                  */
-  0x75, 0x01,        /*   Report Size (1)                      */
-  0x95, 0x02,        /*   Report Count (2)                     */
-  0xB1, 0x22,        /*   Feature (Data,Var,Abs,NoWrp)         */
-  0x75, 0x06,        /*   Report Size (6)                      */
-  0x95, 0x01,        /*   Report Count (1)                     */
-  0xB1, 0x01,        /*   Feature (Const,Array,Abs,NoWrp)      */
-  0xC0               /* End Collection                         */
-};
+extern uint8_t *Active_HID_ReportDesc;
+extern uint16_t Active_HID_ReportDescSize;
 
 static uint8_t HIDInEpAdd = HID_EPIN_ADDR;
 
@@ -388,6 +353,16 @@ static uint8_t USBD_HID_Setup(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *re
           (void)USBD_CtlSendData(pdev, (uint8_t *)&hhid->IdleState, 1U);
           break;
 
+        case USBD_HID_REQ_SET_REPORT:
+          if ((req->wValue >> 8) == 0x03) {
+              /* Receive up to 32 bytes of Feature Report */
+              USBD_CtlPrepareRx(pdev, HID_Feature_Buffer, MIN(req->wLength, 32));
+          } else {
+              USBD_CtlError(pdev, req);
+              ret = USBD_FAIL;
+          }
+          break;
+
         default:
           USBD_CtlError(pdev, req);
           ret = USBD_FAIL;
@@ -412,8 +387,8 @@ static uint8_t USBD_HID_Setup(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *re
         case USB_REQ_GET_DESCRIPTOR:
           if ((req->wValue >> 8) == HID_REPORT_DESC)
           {
-            len = MIN(HID_MOUSE_REPORT_DESC_SIZE, req->wLength);
-            pbuf = HID_MOUSE_ReportDesc;
+            len = MIN(Active_HID_ReportDescSize, req->wLength);
+            pbuf = Active_HID_ReportDesc;
           }
           else if ((req->wValue >> 8) == HID_DESCRIPTOR_TYPE)
           {
@@ -617,6 +592,12 @@ static uint8_t USBD_HID_DataIn(USBD_HandleTypeDef *pdev, uint8_t epnum)
   be caused by  a new transfer before the end of the previous transfer */
   ((USBD_HID_HandleTypeDef *)pdev->pClassDataCmsit[pdev->classId])->state = USBD_HID_IDLE;
 
+  return (uint8_t)USBD_OK;
+}
+
+static uint8_t USBD_HID_EP0_RxReady(USBD_HandleTypeDef *pdev)
+{
+  Process_Feature_Report(HID_Feature_Buffer);
   return (uint8_t)USBD_OK;
 }
 

@@ -1,0 +1,368 @@
+#include "sensor_mlx90393.h"
+#include "config.h"
+#include "spi.h"
+#include "debug_console.h"
+#include "main.h"
+#include "core_cm7.h"
+#include <stdio.h>
+#include <string.h>
+
+extern SPI_HandleTypeDef hspi1;
+
+// ==================== Глобальный массив ====================
+MLX90393_t sensors[NUM_SENSORS];
+
+// ==================== Константы ====================
+#define MLX_CMD_SM      0x3F
+#define MLX_CMD_RM      0x4F
+#define MLX_CMD_RESET   0xF0
+
+#define DMA_BUF_SIZE        10
+#define SENSOR_TIMEOUT_MS   50
+#define FILTER_ALPHA        0.3f
+
+static uint8_t tx_dma[DMA_BUF_SIZE] __attribute__((aligned(32)));
+static uint8_t rx_dma[DMA_BUF_SIZE] __attribute__((aligned(32)));
+
+static volatile uint8_t dma_busy = 0;
+static volatile uint8_t active_sensor = 0xFF;
+static uint8_t dma_state_machine = 0;           // 0=idle, 1=wait conv, 2=reading
+static uint32_t conversion_start = 0;
+
+// Коэффициенты
+static const float gain_coeff[8][2] = {
+    {0.751f, 1.210f}, {0.601f, 0.968f}, {0.451f, 0.726f}, {0.376f, 0.605f},
+    {0.300f, 0.484f}, {0.250f, 0.403f}, {0.200f, 0.323f}, {0.150f, 0.242f}
+};
+
+// IIR-фильтр
+static inline float filter(float old, float new_val) {
+    return old * (1.0f - FILTER_ALPHA) + new_val * FILTER_ALPHA;
+}
+
+// CS helpers (чтобы не было implicit declaration)
+static inline void sensor_select(MLX90393_t *s) {
+    HAL_GPIO_WritePin(s->cs_port, s->cs_pin, GPIO_PIN_RESET);
+}
+static inline void sensor_deselect(MLX90393_t *s) {
+    HAL_GPIO_WritePin(s->cs_port, s->cs_pin, GPIO_PIN_SET);
+}
+
+// ==================== Инициализация ====================
+void Sensors_Init(void)
+{
+    Debug_Print(LOG_LEVEL_INFO, "Initializing magnetic sensors...\r\n");
+
+    for (int i = 0; i < NUM_SENSORS; i++) {
+        sensors[i].spi = &hspi1;
+        sensors[i].cs_port = GPIOC;
+        sensors[i].cs_pin = (i==0)?Sensor1_CS_Pin:(i==1)?Sensor2_CS_Pin:(i==2)?Sensor3_CS_Pin:
+                            (i==3)?Sensor4_CS_Pin:(i==4)?Sensor5_CS_Pin:0;
+        sensors[i].is_connected = 0;
+        sensors[i].gain_sel = 7;
+        sensors[i].magnetic_field[0] = sensors[i].magnetic_field[1] = sensors[i].magnetic_field[2] = 0;
+        sensors[i].offset[0] = sensors[i].offset[1] = sensors[i].offset[2] = 0;
+        sensors[i].scale[0] = sensors[i].scale[1] = sensors[i].scale[2] = 1.0f;
+        sensors[i].is_calibrated = 0;
+        sensors[i].dma_state = 0;
+        sensors[i].read_error_count = 0;
+        sensor_deselect(&sensors[i]);
+    }
+
+    // Проверка связи + RESET
+    for (int i = 0; i < ACTIVE_SENSORS; i++) {
+        uint8_t tx[2] = {MLX_CMD_RESET, 0x00};
+        uint8_t rx[2];
+        sensor_select(&sensors[i]);
+        HAL_SPI_TransmitReceive(&hspi1, tx, rx, 2, 100);
+        sensor_deselect(&sensors[i]);
+        HAL_Delay(10);
+
+        if (!(rx[0]==0xFF && rx[1]==0xFF)) {
+            sensors[i].is_connected = 1;
+            Debug_Print(LOG_LEVEL_INFO, "Sensor %d detected\r\n", i);
+        }
+    }
+
+    dma_busy = 0;
+    active_sensor = 0xFF;
+    dma_state_machine = 0;
+    Debug_Print(LOG_LEVEL_INFO, "MLX90393 init done, %d sensors active\r\n", ACTIVE_SENSORS);
+}
+
+// ==================== DMA-цикл (рабочий вариант) ====================
+static void Start_All_Sensors_Conversion(void)
+{
+    for (int i = 0; i < ACTIVE_SENSORS; i++) {
+        if (!sensors[i].is_connected) continue;
+        uint8_t cmd[2] = {MLX_CMD_SM, 0x00};
+        sensor_select(&sensors[i]);
+        HAL_SPI_Transmit(&hspi1, cmd, 2, 10);
+        sensor_deselect(&sensors[i]);
+        HAL_Delay(1);
+    }
+    conversion_start = HAL_GetTick();
+    dma_state_machine = 1;
+}
+
+static void Start_Sensor_Read(uint8_t idx)
+{
+    if (dma_busy || active_sensor != 0xFF || !sensors[idx].is_connected) return;
+
+    active_sensor = idx;
+    dma_busy = 1;
+    sensors[idx].dma_state = 1;
+    sensors[idx].dma_start_tick = HAL_GetTick();
+
+    tx_dma[0] = MLX_CMD_RM; tx_dma[1] = 0x00;
+    for (int i = 2; i < 10; i++) tx_dma[i] = 0;
+
+    SCB_CleanDCache_by_Addr((uint32_t*)tx_dma, 32);
+    SCB_InvalidateDCache_by_Addr((uint32_t*)rx_dma, 32);
+
+    sensor_select(&sensors[idx]);
+    HAL_SPI_TransmitReceive_DMA(&hspi1, tx_dma, rx_dma, 10);
+}
+
+static void Process_Sensor_Data(uint8_t idx)
+{
+    MLX90393_t *s = &sensors[idx];
+    int16_t xraw = (rx_dma[4]<<8) | rx_dma[5];
+    int16_t yraw = (rx_dma[6]<<8) | rx_dma[7];
+    int16_t zraw = (rx_dma[8]<<8) | rx_dma[9];
+
+    uint8_t gain = (s->gain_sel <= 7) ? s->gain_sel : 7;
+    float lsb_xy = gain_coeff[gain][0];
+    float lsb_z  = gain_coeff[gain][1];
+
+    float Bx = xraw * lsb_xy;
+    float By = yraw * lsb_xy;
+    float Bz = zraw * lsb_z;
+
+    s->magnetic_field[0] = filter(s->magnetic_field[0], Bx);
+    s->magnetic_field[1] = filter(s->magnetic_field[1], By);
+    s->magnetic_field[2] = filter(s->magnetic_field[2], Bz);
+
+    s->last_read_time = HAL_GetTick();
+    s->total_reads++;
+    s->read_error_count = 0;
+}
+
+void Sensors_Update(void)
+{
+    uint32_t now = HAL_GetTick();
+
+    switch (dma_state_machine) {
+        case 0:
+            Start_All_Sensors_Conversion();
+            break;
+        case 1:
+            if (now - conversion_start >= 3) {
+                dma_state_machine = 2;
+                Start_Sensor_Read(0);
+            }
+            break;
+        case 2:
+            if (active_sensor != 0xFF && sensors[active_sensor].dma_state == 1) {
+                if (now - sensors[active_sensor].dma_start_tick > SENSOR_TIMEOUT_MS) {
+                    Debug_Print(LOG_LEVEL_ERROR, "DMA timeout sensor %d\n", active_sensor);
+                    sensors[active_sensor].read_error_count++;
+                    sensor_deselect(&sensors[active_sensor]);
+                    HAL_SPI_DMAStop(&hspi1);
+                    dma_busy = 0;
+                    active_sensor = 0xFF;
+                }
+            } else {
+                static uint8_t next = 0;
+                uint8_t start = next;
+                do {
+                    if (sensors[next].is_connected && sensors[next].dma_state == 0) {
+                        Start_Sensor_Read(next);
+                        next = (next + 1) % ACTIVE_SENSORS;
+                        break;
+                    }
+                    next = (next + 1) % ACTIVE_SENSORS;
+                } while (next != start);
+            }
+
+            uint8_t all_done = 1;
+            for (int i = 0; i < ACTIVE_SENSORS; i++) if (sensors[i].dma_state == 1) all_done = 0;
+            if (all_done) dma_state_machine = 0;
+            break;
+    }
+}
+
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi->Instance != SPI1 || active_sensor == 0xFF) return;
+
+    SCB_InvalidateDCache_by_Addr((uint32_t*)rx_dma, 32);
+    sensor_deselect(&sensors[active_sensor]);
+
+    Process_Sensor_Data(active_sensor);
+
+    sensors[active_sensor].dma_state = 0;
+    dma_busy = 0;
+    active_sensor = 0xFF;
+}
+
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi->Instance == SPI1) {
+        Debug_Print(LOG_LEVEL_ERROR, "SPI error on sensor %d, error=%lu\n", active_sensor, hspi->ErrorCode);
+        if (active_sensor != 0xFF) {
+            sensor_deselect(&sensors[active_sensor]);
+            sensors[active_sensor].dma_state = 0;
+        }
+        dma_busy = 0;
+        active_sensor = 0xFF;
+    }
+}
+
+// ==================== Синхронные функции (для калибровки и команд) ====================
+uint8_t Read_Sensor_With_Gain(uint8_t sensor_idx)
+{
+    if (sensor_idx >= NUM_SENSORS || !sensors[sensor_idx].is_connected) return 0;
+    MLX90393_t *s = &sensors[sensor_idx];
+
+    uint8_t tx[2] = {MLX_CMD_SM, 0x00};
+    sensor_select(s);
+    HAL_SPI_TransmitReceive(&hspi1, tx, tx, 2, 100);  // dummy rx
+    sensor_deselect(s);
+    HAL_Delay(3);
+
+    uint8_t tx_read[7] = {MLX_CMD_RM, 0,0,0,0,0,0};
+    uint8_t rx_read[7];
+    sensor_select(s);
+    HAL_SPI_TransmitReceive(&hspi1, tx_read, rx_read, 7, 100);
+    sensor_deselect(s);
+
+    int16_t xraw = (rx_read[1]<<8) | rx_read[2];
+    int16_t yraw = (rx_read[3]<<8) | rx_read[4];
+    int16_t zraw = (rx_read[5]<<8) | rx_read[6];
+
+    uint8_t gain = (s->gain_sel <= 7) ? s->gain_sel : 7;
+    float lsb_xy = gain_coeff[gain][0];
+    float lsb_z  = gain_coeff[gain][1];
+
+    s->magnetic_field[0] = xraw * lsb_xy;
+    s->magnetic_field[1] = yraw * lsb_xy;
+    s->magnetic_field[2] = zraw * lsb_z;
+
+    return 1;
+}
+
+// ------------------------------------------------------------------
+// Калибровка смещения (без шара)
+// ------------------------------------------------------------------
+void Calibrate_Offset_Procedure(uint8_t sensor_idx)
+{
+    if (sensor_idx >= NUM_SENSORS) return;
+    MLX90393_t *s = &sensors[sensor_idx];
+    if (!s->is_connected) {
+        Debug_Print(LOG_LEVEL_ERROR, "Sensor %d not connected\r\n", sensor_idx);
+        return;
+    }
+
+    Debug_Print(LOG_LEVEL_INFO, "Calibrating sensor %d...\r\n", sensor_idx);
+    float sum_x = 0, sum_y = 0, sum_z = 0;
+    const int samples = 20;
+
+    for (int i = 0; i < samples; i++) {
+        if (Read_Sensor_With_Gain(sensor_idx)) {
+            sum_x += s->magnetic_field[0];
+            sum_y += s->magnetic_field[1];
+            sum_z += s->magnetic_field[2];
+        }
+        HAL_Delay(50);
+    }
+
+    s->offset[0] = -sum_x / samples;
+    s->offset[1] = -sum_y / samples;
+    s->offset[2] = -sum_z / samples;
+    s->is_calibrated = 1;
+
+    Debug_Print(LOG_LEVEL_INFO, "Offset: X=%.1f, Y=%.1f, Z=%.1f µT\r\n",
+                s->offset[0], s->offset[1], s->offset[2]);
+}
+
+// ------------------------------------------------------------------
+// Чтение с калибровкой
+// ------------------------------------------------------------------
+uint8_t Read_Sensor_Calibrated(uint8_t sensor_idx)
+{
+    if (!Read_Sensor_With_Gain(sensor_idx)) return 0;
+    MLX90393_t *s = &sensors[sensor_idx];
+    if (!s->is_calibrated) {
+        Debug_Print(LOG_LEVEL_INFO, "Sensor %d not calibrated, raw data displayed.\r\n", sensor_idx);
+        return 1;
+    }
+    float cal_x = s->magnetic_field[0] + s->offset[0];
+    float cal_y = s->magnetic_field[1] + s->offset[1];
+    float cal_z = s->magnetic_field[2] + s->offset[2];
+    float mag = sqrtf(cal_x*cal_x + cal_y*cal_y + cal_z*cal_z);
+    Debug_Print(LOG_LEVEL_INFO, "Sensor %d calibrated: X=%.1f, Y=%.1f, Z=%.1f µT, magnitude=%.1f µT\r\n",
+                sensor_idx, cal_x, cal_y, cal_z, mag);
+    return 1;
+}
+
+// ------------------------------------------------------------------
+// Вспомогательные функции (для совместимости с main.c)
+// ------------------------------------------------------------------
+uint8_t Test_Sensor_Connection(uint8_t sensor_idx)
+{
+    if (sensor_idx >= NUM_SENSORS) return 0;
+    return sensors[sensor_idx].is_connected;
+}
+
+float Calculate_Magnetic_Field_Strength(uint8_t sensor_idx)
+{
+    if (sensor_idx >= NUM_SENSORS) return 0.0f;
+    MLX90393_t *s = &sensors[sensor_idx];
+    float x = s->magnetic_field[0];
+    float y = s->magnetic_field[1];
+    float z = s->magnetic_field[2];
+    return sqrtf(x*x + y*y + z*z);
+}
+
+uint8_t Quick_Read_Sensor(uint8_t sensor_idx)
+{
+    return Read_Sensor_Calibrated(sensor_idx);
+}
+
+uint8_t Read_Sensor(uint8_t sensor_idx)
+{
+    return Read_Sensor_With_Gain(sensor_idx);
+}
+
+void Calibrate_Sensors_Start(void)
+{
+    for (uint8_t i = 0; i < ACTIVE_SENSORS; i++) {
+        if (sensors[i].is_connected) {
+            Calibrate_Offset_Procedure(i);
+        }
+    }
+}
+
+void Get_Sensor_Stats_String(char *buffer, uint16_t buffer_size)
+{
+    int connected = 0;
+    for (int i = 0; i < ACTIVE_SENSORS; i++)
+        if (sensors[i].is_connected) connected++;
+    snprintf(buffer, buffer_size, "Sensors: %d/%d connected", connected, ACTIVE_SENSORS);
+}
+
+// ------------------------------------------------------------------
+// Сохранение/загрузка калибровки во flash (заглушки, при необходимости реализовать)
+// ------------------------------------------------------------------
+void Save_Calibration_To_Flash(void)
+{
+    Debug_Print(LOG_LEVEL_INFO, "Save_Calibration_To_Flash not implemented\r\n");
+}
+
+void Load_Calibration_From_Flash(void)
+{
+    Debug_Print(LOG_LEVEL_INFO, "Load_Calibration_From_Flash not implemented\r\n");
+}
+
+

@@ -7,6 +7,7 @@
 
 static UART_HandleTypeDef* debug_uart = NULL;
 static LogLevel_t current_log_level = LOG_LEVEL_INFO;
+extern volatile uint8_t training_mode;
 
 
 void Debug_Init(UART_HandleTypeDef* huart) {
@@ -15,6 +16,7 @@ void Debug_Init(UART_HandleTypeDef* huart) {
 
 void Debug_Print(LogLevel_t level, const char* format, ...) {
     if(level > current_log_level || debug_uart == NULL) return;
+    if (training_mode) return;
     char buffer[256];
     va_list args;
     va_start(args, format);

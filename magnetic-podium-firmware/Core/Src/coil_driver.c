@@ -35,10 +35,6 @@ void Coils_Init(void)
             case 5:  coils[i].dir_port = Coil6_DIR_GPIO_Port; coils[i].dir_pin = Coil6_DIR_Pin; break;
             case 6:  coils[i].dir_port = Coil7_DIR_GPIO_Port; coils[i].dir_pin = Coil7_DIR_Pin; break;
             case 7:  coils[i].dir_port = Coil8_DIR_GPIO_Port; coils[i].dir_pin = Coil8_DIR_Pin; break;
-            case 8:  coils[i].dir_port = Coil9_DIR_GPIO_Port; coils[i].dir_pin = Coil9_DIR_Pin; break;
-            case 9:  coils[i].dir_port = Coil10_DIR_GPIO_Port; coils[i].dir_pin = Coil10_DIR_Pin; break;
-            case 10: coils[i].dir_port = Coil11_DIR_GPIO_Port; coils[i].dir_pin = Coil11_DIR_Pin; break;
-            case 11: coils[i].dir_port = Coil12_DIR_GPIO_Port; coils[i].dir_pin = Coil12_DIR_Pin; break;
             default: coils[i].dir_port = GPIOE; coils[i].dir_pin = 0; break;
         }
 
@@ -49,18 +45,12 @@ void Coils_Init(void)
             coils[i].channel = (i == 0) ? TIM_CHANNEL_1 :
                                (i == 1) ? TIM_CHANNEL_2 :
                                (i == 2) ? TIM_CHANNEL_3 : TIM_CHANNEL_4;
-        } else if (i < 8) {
+        } else {
             // Следующие 4 на TIM2
             coils[i].timer = &htim2;
             coils[i].channel = (i == 4) ? TIM_CHANNEL_1 :
                                (i == 5) ? TIM_CHANNEL_2 :
                                (i == 6) ? TIM_CHANNEL_3 : TIM_CHANNEL_4;
-        } else {
-            // Последние 4 на TIM3
-            coils[i].timer = &htim3;
-            coils[i].channel = (i == 8) ? TIM_CHANNEL_1 :
-                               (i == 9) ? TIM_CHANNEL_2 :
-                               (i == 10) ? TIM_CHANNEL_3 : TIM_CHANNEL_4;
         }
     }
 
@@ -254,15 +244,5 @@ uint32_t Get_Coils_Total_On_Time(void)
 float Get_Coil_SignedPower(uint8_t coil_idx)
 {
     if (coil_idx >= NUM_COILS) return 0.0f;
-    Coil_t *coil = &coils[coil_idx];
-
-    // Читаем состояние пина направления
-    GPIO_PinState pin_state = HAL_GPIO_ReadPin(coil->dir_port, coil->dir_pin);
-
-    // Если пин установлен (GPIO_PIN_SET) – направление отрицательное, иначе положительное
-    if (pin_state == GPIO_PIN_SET) {
-        return -coil->current_pwm;
-    } else {
-        return coil->current_pwm;
-    }
+    return coils[coil_idx].target_pwm;
 }

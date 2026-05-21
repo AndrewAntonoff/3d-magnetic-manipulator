@@ -39,6 +39,8 @@ typedef struct {
     uint32_t dma_start_tick;          // время начала последней DMA-передачи
     uint8_t tx_dma[32] __attribute__((aligned(32)));  // буфер для команды
     uint8_t rx_dma[32] __attribute__((aligned(32)));  // буфер для приёма
+
+    uint8_t index;
 } MLX90393_t;
 
 
@@ -52,6 +54,7 @@ void Calibrate_Offset_Procedure(uint8_t sensor_idx);
 uint8_t Read_Sensor_Calibrated(uint8_t sensor_idx);
 void Save_Calibration_To_Flash(void);
 void Load_Calibration_From_Flash(void);
+void Sensors_Tick(void);
 
 // DMA
 

@@ -49,6 +49,7 @@ MEMORY
   RAM_D2 (xrw)   : ORIGIN = 0x30000000, LENGTH = 288K
   RAM_D3 (xrw)   : ORIGIN = 0x38000000, LENGTH = 64K
   ITCMRAM (xrw)  : ORIGIN = 0x00000000, LENGTH = 64K
+  QSPI (rx)      : ORIGIN = 0x90000000, LENGTH = 8M
 }
 
 /* Define output sections */
@@ -175,6 +176,15 @@ SECTIONS
   }
 
   .ARM.attributes 0 : { *(.ARM.attributes) }
+
+  /* QSPI Section for VL53L5X firmware blob and other external data */
+  .qspi_data :
+  {
+    . = ALIGN(4);
+    KEEP(*(.ExtQSPIFlashSection)) /* For VL53L5X firmware */
+    *(.ExtQSPIFlashSection*)
+    . = ALIGN(4);
+  } >QSPI
 }
 
 

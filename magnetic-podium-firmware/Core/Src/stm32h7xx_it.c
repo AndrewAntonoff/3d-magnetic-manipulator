@@ -63,7 +63,7 @@ extern TIM_HandleTypeDef htim6;
 extern UART_HandleTypeDef huart2;
 extern UART_HandleTypeDef huart3;
 /* USER CODE BEGIN EV */
-
+extern void Process_IMU_Byte(uint8_t byte);
 /* USER CODE END EV */
 
 /******************************************************************************/
