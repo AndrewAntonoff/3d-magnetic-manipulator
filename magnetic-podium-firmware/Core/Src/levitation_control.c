@@ -11,13 +11,21 @@
 
 extern MLX90393_t sensors[NUM_SENSORS];
 
-// Поле постоянного магнита (измерено без шара)
-static const float B_permanent[5][3] = {
+// Поле постоянного магнита (измерено без шара) – все датчики заполнены!
+static const float B_permanent[8][3] = {
     {13076.9f, 2180.7f, 6859.3f},   // датчик 0 (центр дна)
     {10834.9f, 3748.3f, -15988.2f}, // датчик 1
     {17922.4f, -208.4f, -24747.2f}, // датчик 2
     {-10471.3f, -2354.4f, 21186.9f},// датчик 3
-    {-6204.0f, 313.3f, 18233.3f}    // датчик 4
+    {-6204.0f, 313.3f, 18233.3f},   // датчик 4
+    // TODO: датчики 5–7 не откалиброваны — нули не компенсируют
+    // поле постоянного магнита, что смещает оценку XY-позиции.
+    // Процедура: отключить все катушки, убрать шар, снять показания
+    // каждого датчика командой 'sensor 5', 'sensor 6', 'sensor 7'
+    // и вписать средние значения ниже.
+    {0.0f, 0.0f, 0.0f},             // датчик 5 — ТРЕБУЕТ КАЛИБРОВКИ
+    {0.0f, 0.0f, 0.0f},             // датчик 6 — ТРЕБУЕТ КАЛИБРОВКИ
+    {0.0f, 0.0f, 0.0f}              // датчик 7 — ТРЕБУЕТ КАЛИБРОВКИ
 };
 
 // ------------------------------------------------------------------
@@ -27,8 +35,8 @@ static const float B_permanent[5][3] = {
 #define HOME_Z          25.0f              // домашняя высота (мм)
 #define RELEASE_DIST_THRESH  2.0f          // порог расстояния для отпускания (мм)
 #define RELEASE_SPEED_THRESH 5.0f          // порог скорости (мм/с)
-#define K_FORCE 2.0f                       // общий коэффициент усиления силы
-#define BALL_WEIGHT_N 1.7f                  // вес шара в ньютонах (подберите по массе)
+#define K_FORCE 2.5f                       // общий коэффициент усиления силы (уменьшен)
+#define BALL_WEIGHT_N 1.7f                  // вес шара в ньютонах
 
 // ------------------------------------------------------------------
 // Глобальные переменные
@@ -56,9 +64,6 @@ float PowerToCurrent(float power);
 // Вспомогательные функции (математика поля)
 // ------------------------------------------------------------------
 
-/**
- * Вычисляет силу и момент, действующие на диполь шара со стороны одной катушки.
- */
 static void Compute_ForceTorque(uint8_t coil_idx, const float ball_pos[3],
                                 const float ball_moment[3],
                                 float force[3], float torque[3])
@@ -115,9 +120,6 @@ static void Compute_ForceTorque(uint8_t coil_idx, const float ball_pos[3],
     }
 }
 
-/**
- * Заполнение матрицы A (6x12) для текущего положения и момента шара.
- */
 static void Build_Matrix_A(const float ball_pos[3], const float ball_moment[3],
                            float A[6][12])
 {
@@ -131,10 +133,6 @@ static void Build_Matrix_A(const float ball_pos[3], const float ball_moment[3],
     }
 }
 
-/**
- * Обращение матрицы 6x6 методом Гаусса-Жордана.
- * Возвращает 1 при успехе, 0 если матрица вырождена.
- */
 static int InvertMatrix_6x6(const float A[6][6], float inv[6][6])
 {
     double aug[6][12];
@@ -187,13 +185,11 @@ static int InvertMatrix_6x6(const float A[6][6], float inv[6][6])
     return 1;
 }
 
-/**
- * Решение системы I = pinv(A) * u с регуляризацией.
- */
 static void Solve_Currents(const float A[6][12], const float u[6],
                            float I[12], float lambda)
 {
-    lambda = 0.001f;
+    // lambda is a Tikhonov regularisation factor passed by the caller
+    // (previously this line was overwriting the parameter — removed)
     float C[6][6] = {0};
     for (int i = 0; i < 6; i++) {
         for (int j = 0; j < 6; j++) {
@@ -231,7 +227,6 @@ static void Solve_Currents(const float A[6][12], const float u[6],
         }
     }
 
-    // Ограничение токов
     float max_abs = 0.0f;
     for (int k = 0; k < NUM_COILS; k++) {
         float abs_val = fabsf(I[k]);
@@ -257,12 +252,14 @@ static void Solve_Currents(const float A[6][12], const float u[6],
 
 void Initialize_Coil_Geometry(void) {
     const float center_z = 55.0f;
+    const float R_coil_xy = 35.0f;
+    const float z_coil = 30.0f;
 
-    for (int i = 0; i < 4; i++) {
-        float theta = i * (M_PI / 2.0f);
-        coil_geometry[i].x = 25.0f * cosf(theta);
-        coil_geometry[i].y = 25.0f * sinf(theta);
-        coil_geometry[i].z = 7.0f;
+    for (int i = 0; i < NUM_COILS; i++) {
+        float theta = i * (M_PI / 4.0f);
+        coil_geometry[i].x = R_coil_xy * cosf(theta);
+        coil_geometry[i].y = R_coil_xy * sinf(theta);
+        coil_geometry[i].z = z_coil;
 
         float dx = -coil_geometry[i].x;
         float dy = -coil_geometry[i].y;
@@ -273,51 +270,28 @@ void Initialize_Coil_Geometry(void) {
         coil_geometry[i].orientation[2] = dz / norm;
     }
 
-    for (int i = 0; i < 8; i++) {
-        float theta = i * (M_PI / 4.0f);
-        coil_geometry[i+4].x = 45.0f * cosf(theta);
-        coil_geometry[i+4].y = 45.0f * sinf(theta);
-        coil_geometry[i+4].z = 30.0f;
-
-        float dx = -coil_geometry[i+4].x;
-        float dy = -coil_geometry[i+4].y;
-        float dz = center_z - coil_geometry[i+4].z;
-        float norm = sqrtf(dx*dx + dy*dy + dz*dz);
-        coil_geometry[i+4].orientation[0] = dx / norm;
-        coil_geometry[i+4].orientation[1] = dy / norm;
-        coil_geometry[i+4].orientation[2] = dz / norm;
-    }
-
-    Debug_Print(LOG_LEVEL_INFO, "Coil geometry OK (center_z=55 mm)\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "Coil geometry OK (8 hemisphere sectors)\r\n");
 }
 
 void Initialize_Sensor_Geometry(void) {
-    sensors[0].geometry.x = 0.0f;
-    sensors[0].geometry.y = 0.0f;
-    sensors[0].geometry.z = 2.0f;
+    const float R_sensor_xy = 45.0f;
+    const float z_sensor = 20.0f;
 
-    float r = 35.0f;
-    float z = 15.0f;
-    float angles[4] = {45.0f, 135.0f, 225.0f, 315.0f};
-
-    for (int i = 0; i < 4; i++) {
-        float theta = angles[i] * M_PI / 180.0f;
-        sensors[i+1].geometry.x = r * cosf(theta);
-        sensors[i+1].geometry.y = r * sinf(theta);
-        sensors[i+1].geometry.z = z;
+    for (int i = 0; i < NUM_SENSORS; i++) {
+        float theta = i * (M_PI / 4.0f);
+        sensors[i].geometry.x = R_sensor_xy * cosf(theta);
+        sensors[i].geometry.y = R_sensor_xy * sinf(theta);
+        sensors[i].geometry.z = z_sensor;
     }
 
-    Debug_Print(LOG_LEVEL_INFO, "Sensor geometry OK (r=35 mm @ 45°)\r\n");
+    Debug_Print(LOG_LEVEL_INFO, "Sensor geometry OK (8 sensors behind coils)\r\n");
 }
 
-/**
- * Улучшенная оценка позиции с вычитанием поля катушек и фильтрацией.
- */
 void EstimateBallPosition(float ball_pos[3], const float orientation[4])
 {
     // 1. Скорректированные показания датчиков (вычитаем поле катушек)
     float corrected_field[ACTIVE_SENSORS][3];
-    float coil_field_cache[NUM_COILS][5][3]; // кэш полей для текущих токов
+    float coil_field_cache[NUM_COILS][ACTIVE_SENSORS][3]; // кэш полей для текущих токов
 
     float coil_currents[NUM_COILS];
     for (int c = 0; c < NUM_COILS; c++) {
@@ -348,27 +322,17 @@ void EstimateBallPosition(float ball_pos[3], const float orientation[4])
         corrected_field[s][2] -= B_permanent[s][2];
     }
 
-    // === НОВАЯ ОЦЕНКА ВЫСОТЫ ПО НИЖНЕМУ ДАТЧИКУ (датчик 0) ===
-    // Используем модуль вектора, так как он менее чувствителен к ориентации
-    float B_mag = sqrtf(corrected_field[0][0]*corrected_field[0][0] +
-                        corrected_field[0][1]*corrected_field[0][1] +
-                        corrected_field[0][2]*corrected_field[0][2]);
-    float z_est;
-    if (B_mag < 10.0f) {
-        // Слишком слабое поле – аварийно устанавливаем высоту
-        z_est = 25.0f;
-    } else {
-        // Константа Kz откалибрована по измерению на высоте 25 мм:
-        // |B| = 20512.5 µT, (25-2)=23 мм, Kz = 20512.5 * 23^3 = 249575587.5
-        const float Kz = 249600000.0f; // ≈ 2.496e8
-        // Правильная формула: z = (Kz / |B|)^(1/3) + 2.0
-        z_est = powf(Kz / B_mag, 1.0f/3.0f) + 2.0f;
+    // === ОЦЕНКА ВЫСОТЫ ПО ДАТЧИКУ VL53L5X ===
+    extern float VL53L5X_GetDistance(void);
+    float z_est = VL53L5X_GetDistance();
+    if (z_est < 1.0f || z_est > 100.0f) {
+        z_est = system_state.ball_position[2]; // Сохраняем последнее значение при ошибке
     }
 
-    // === ОЦЕНКА XY ПО БОКОВЫМ ДАТЧИКАМ (взвешенное среднее) ===
+    // === ОЦЕНКА XY ПО СЕКТОРНЫМ ДАТЧИКАМ (взвешенное среднее) ===
     float weights[ACTIVE_SENSORS];
     float total_weight = 0.0f;
-    for (int i = 1; i < ACTIVE_SENSORS; i++) { // используем только датчики 1-4
+    for (int i = 0; i < ACTIVE_SENSORS; i++) {
         if (sensors[i].is_connected) {
             float B2 = corrected_field[i][0]*corrected_field[i][0] +
                        corrected_field[i][1]*corrected_field[i][1] +
@@ -386,7 +350,7 @@ void EstimateBallPosition(float ball_pos[3], const float orientation[4])
 
     float rough_x = 0, rough_y = 0;
     if (total_weight > 0.0f) {
-        for (int i = 1; i < ACTIVE_SENSORS; i++) {
+        for (int i = 0; i < ACTIVE_SENSORS; i++) {
             rough_x += sensors[i].geometry.x * weights[i];
             rough_y += sensors[i].geometry.y * weights[i];
         }
@@ -420,12 +384,12 @@ void EstimateBallPosition(float ball_pos[3], const float orientation[4])
     if (ball_pos[2] < 5.0f) ball_pos[2] = 5.0f;
     if (ball_pos[2] > 40.0f) ball_pos[2] = 40.0f;
 
-    // Периодическая отладка (раз в 500 вызовов)
+    // Периодическая отладка (раз в 100 вызовов)
     static uint32_t counter = 0;
-    if (++counter >= 500) {
+    if (++counter >= 100) {
         counter = 0;
-        Debug_Print(LOG_LEVEL_INFO, "Est: (%.1f, %.1f, %.1f) |B0|=%.0f\n",
-                    ball_pos[0], ball_pos[1], ball_pos[2], B_mag);
+        Debug_Print(LOG_LEVEL_INFO, "Est: (%.1f, %.1f, %.1f)\n",
+                    ball_pos[0], ball_pos[1], ball_pos[2]);
     }
 }
 
@@ -433,17 +397,17 @@ void EstimateBallPosition(float ball_pos[3], const float orientation[4])
 // ПИД-регулятор (6 степеней свободы)
 // ------------------------------------------------------------------
 PID_6DOF_t pid_controller = {
-    .Kp_pos = {15.0f, 12.0f, 1.5f},   // X, Y, Z
+    .Kp_pos = {20.0f, 18.0f, 1.8f},   // X, Y, Z (увеличено)
     .Ki_pos = {0.001f, 0.001f, 0.01f},
-    .Kd_pos = {8.0f, 8.0f, 0.05f},
+    .Kd_pos = {10.0f, 10.0f, 0.08f},
     .integral_pos = {0},
     .prev_error_pos = {0},
     .setpoint_pos = {0.0f, 0.0f, 25.0f},
     .output_pos = {0},
 
-    .Kp_ori = {0.05f, 0.05f, 0.02f},
-    .Ki_ori = {0.005f, 0.005f, 0.002f},
-    .Kd_ori = {0.02f, 0.02f, 0.01f},
+	.Kp_ori = {0.1f, 0.1f, 0.1f},
+	.Ki_ori = {0.0f, 0.0f, 0.0f},
+	.Kd_ori = {0.05f, 0.05f, 0.05f},
     .integral_ori = {0},
     .prev_error_ori = {0},
     .setpoint_ori = {0,0,0},
@@ -533,19 +497,52 @@ void Calculate_Coil_Forces(float fx, float fy, float fz,
                          system_state.ball_position[1],
                          system_state.ball_position[2]};
 
-    // Магнитный момент шара (подобран экспериментально, при необходимости замените)
-    float ball_moment[3] = {-15.0f, -6.0f, 8.0f};
+    IMU_Data_t imu;
+    __disable_irq();
+    memcpy(&imu, (void*)&last_imu_data, sizeof(IMU_Data_t));
+    __enable_irq();
+
+    float roll  = imu.roll  * 0.001f;
+    float pitch = imu.pitch * 0.001f;
+    float yaw   = imu.yaw   * 0.001f;
+
+    // Local permanent magnet moment
+    float M_local[3] = {-5.0f, -2.1f, 2.7f};
+
+    // Calculate rotation matrix (ZYX Euler sequence)
+    float cr = cosf(roll);
+    float sr = sinf(roll);
+    float cp = cosf(pitch);
+    float sp = sinf(pitch);
+    float cy = cosf(yaw);
+    float sy = sinf(yaw);
+
+    float R00 = cy * cp;
+    float R01 = cy * sp * sr - sy * cr;
+    float R02 = cy * sp * cr + sy * sr;
+    float R10 = sy * cp;
+    float R11 = sy * sp * sr + cy * cr;
+    float R12 = sy * sp * cr - cy * sr;
+    float R20 = -sp;
+    float R21 = cp * sr;
+    float R22 = cp * cr;
+
+    // Rotated ball moment vector
+    float ball_moment[3];
+    ball_moment[0] = R00 * M_local[0] + R01 * M_local[1] + R02 * M_local[2];
+    ball_moment[1] = R10 * M_local[0] + R11 * M_local[1] + R12 * M_local[2];
+    ball_moment[2] = R20 * M_local[0] + R21 * M_local[1] + R22 * M_local[2];
     float A[6][12];
     Build_Matrix_A(ball_pos, ball_moment, A);
 
     float u[6] = {fx, fy, fz, tx, ty, tz};
-    // ВРЕМЕННО: отключаем моменты для теста (3DoF)
-    for (int i = 3; i < 6; i++) {
-        u[i] = 0.0f;
-        for (int j = 0; j < NUM_COILS; j++) {
-            A[i][j] = 0.0f;
-        }
-    }
+    // Моменты пока отключены (3DoF) – при необходимости включить позже
+    // for (int i = 3; i < 6; i++) {
+       //  u[i] = 0.0f;
+        // for (int j = 0; j < NUM_COILS; j++) {
+           //  A[i][j] = 0.0f;
+       // }
+    // }
     float I[12];
     Solve_Currents(A, u, I, 0.01f);
 
@@ -586,9 +583,9 @@ void Apply_Levitation_Control(void)
     Update_PID_Controller(dt);
 
     // Формирование желаемых сил (вес учтён)
-    float fx = pid_controller.output_pos[0] * 12.0f;
-    float fy = pid_controller.output_pos[1] * 12.0f;
-    float fz = pid_controller.output_pos[2] * 0.3f + BALL_WEIGHT_N;
+    float fx = pid_controller.output_pos[0] * 20.0f;   // горизонтальные множители увеличены
+    float fy = pid_controller.output_pos[1] * 20.0f;
+    float fz = pid_controller.output_pos[2] * 0.5f + BALL_WEIGHT_N; // вертикальный множитель
 
     if (z < 18.0f) {
         fz += 0.3f;
@@ -598,21 +595,21 @@ void Apply_Levitation_Control(void)
     float ty = pid_controller.output_ori[1];
     float tz = pid_controller.output_ori[2];
 
-    // Ограничения
-    if (fabsf(fx) > 5.0f) fx = 5.0f * (fx > 0 ? 1.0f : -1.0f);
-    if (fabsf(fy) > 5.0f) fy = 5.0f * (fy > 0 ? 1.0f : -1.0f);
-    if (fabsf(fz) > 5.0f) fz = 5.0f * (fz > 0 ? 1.0f : -1.0f);
+    // Clamp forces symmetrically (not a step-jump to a lower value)
+    if (fabsf(fx) > 15.0f) fx = 15.0f * (fx > 0 ? 1.0f : -1.0f);
+    if (fabsf(fy) > 15.0f) fy = 15.0f * (fy > 0 ? 1.0f : -1.0f);
+    if (fabsf(fz) > 15.0f) fz = 15.0f * (fz > 0 ? 1.0f : -1.0f);
 
     float coil_powers[NUM_COILS];
     Calculate_Coil_Forces(fx, fy, fz, tx, ty, tz, coil_powers);
 
     // Мониторинг максимального тока
     static uint32_t current_monitor_counter = 0;
-    if (++current_monitor_counter >= 200) {   // раз в 200 циклов
+    if (++current_monitor_counter >= 200) {
         current_monitor_counter = 0;
         float max_current_rel = 0.0f;
         for (int i = 0; i < NUM_COILS; i++) {
-            float abs_current = fabsf(coil_powers[i]);   // в относительных единицах
+            float abs_current = fabsf(coil_powers[i]);
             if (abs_current > max_current_rel) max_current_rel = abs_current;
         }
         float max_current_amp = max_current_rel * COIL_MAX_CURRENT;
@@ -627,7 +624,6 @@ void Apply_Levitation_Control(void)
         coil_powers[i] = filtered_coil_powers[i];
     }
 
-    // Применяем
     for (int i = 0; i < NUM_COILS; i++) {
         Set_Coil_Power(i, coil_powers[i]);
     }
@@ -644,7 +640,7 @@ void Apply_Levitation_Control(void)
     last_time = current_time;
 
     uint32_t t_end = HAL_GetTick();
-    if (t_end - last_profile > 1000) { // раз в секунду
+    if (t_end - last_profile > 1000) {
         last_profile = t_end;
         Debug_Print(LOG_LEVEL_INFO, "ALC time: %lu ms\n", t_end - t_start);
     }
@@ -716,15 +712,12 @@ float PowerToCurrent(float power) {
     float abs_power = fabsf(power);
     float current = 0.0f;
 
-    // Экстраполяция для малых значений (ниже 0.1)
     if (abs_power <= calib_power[0]) {
         current = calib_current[0] * (abs_power / calib_power[0]);
     }
-    // Экстраполяция для больших значений (выше 1.0) – не должно быть, но на всякий случай
     else if (abs_power >= calib_power[NUM_CALIB_POINTS-1]) {
         current = calib_current[NUM_CALIB_POINTS-1];
     }
-    // Интерполяция между точками
     else {
         for (int i = 0; i < NUM_CALIB_POINTS - 1; i++) {
             if (abs_power >= calib_power[i] && abs_power <= calib_power[i+1]) {
@@ -736,3 +729,5 @@ float PowerToCurrent(float power) {
     }
     return (power >= 0) ? current : -current;
 }
+
+

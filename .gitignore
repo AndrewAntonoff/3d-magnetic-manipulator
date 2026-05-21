@@ -1,0 +1,30 @@
+# Zephyr build output
+magnetic-sphere-firmware/*/build/
+
+# STM32CubeIDE build output
+magnetic-podium-firmware/Debug/
+magnetic-podium-firmware/Release/
+magnetic-podium-firmware/*.elf
+magnetic-podium-firmware/*.bin
+magnetic-podium-firmware/*.hex
+magnetic-podium-firmware/*.map
+
+# IDE files
+.settings/
+.metadata/
+*.launch
+*.cproject
+*.project
+
+# Windows Zone.Identifier sidecar files
+*.Identifier
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db

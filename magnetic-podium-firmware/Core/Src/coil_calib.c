@@ -3,7 +3,8 @@
 #include "debug_console.h"
 
 static CoilCalibData_t calib_data;
-static uint8_t calib_loaded ;
+static uint8_t calib_loaded = 0; // explicit zero-init (C guarantees it for statics, but clarity matters)
+
 
 static float coil_field_zero[COIL_CALIB_NUM_COILS][COIL_CALIB_NUM_SENSORS][3];
 static uint8_t zero_initialized = 0;
@@ -47,9 +48,9 @@ static void Init_Coil_Zero_Field(void) {
     Debug_Print(LOG_LEVEL_INFO, "Coil zero field initialized.\r\n");
 }
 
-void Get_Coil_Field(uint8_t coil, float I, float field[5][3]) {
+void Get_Coil_Field(uint8_t coil, float I, float field[COIL_CALIB_NUM_SENSORS][3]) {
     if (!calib_loaded) {
-        for (int s = 0; s < 5; s++)
+        for (int s = 0; s < COIL_CALIB_NUM_SENSORS; s++)
             for (int k = 0; k < 3; k++)
                 field[s][k] = 0.0f;
         return;
@@ -66,16 +67,16 @@ void Get_Coil_Field(uint8_t coil, float I, float field[5][3]) {
     }
 
     if (I <= calib_data.currents[0]) {
-        for (int s = 0; s < 5; s++)
+        for (int s = 0; s < COIL_CALIB_NUM_SENSORS; s++)
             for (int k = 0; k < 3; k++)
                 field[s][k] = calib_data.field[coil][0][s][k];
     } else if (I >= calib_data.currents[COIL_CALIB_NUM_POINTS-1]) {
-        for (int s = 0; s < 5; s++)
+        for (int s = 0; s < COIL_CALIB_NUM_SENSORS; s++)
             for (int k = 0; k < 3; k++)
                 field[s][k] = calib_data.field[coil][COIL_CALIB_NUM_POINTS-1][s][k];
     } else {
         float t = (I - calib_data.currents[idx]) / (calib_data.currents[idx+1] - calib_data.currents[idx]);
-        for (int s = 0; s < 5; s++) {
+        for (int s = 0; s < COIL_CALIB_NUM_SENSORS; s++) {
             for (int k = 0; k < 3; k++) {
                 float v0 = calib_data.field[coil][idx][s][k];
                 float v1 = calib_data.field[coil][idx+1][s][k];

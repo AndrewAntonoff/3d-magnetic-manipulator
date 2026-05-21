@@ -27,7 +27,9 @@ static const struct bt_uuid_128 magball_data_uuid =
     BT_UUID_INIT_128(BT_UUID_MAGBALL_DATA_VAL);
 static const struct bt_uuid_128 magball_cmd_uuid =
     BT_UUID_INIT_128(BT_UUID_MAGBALL_CMD_VAL);
-static uint32_t notify_enabled_time = 0;    
+/* Timestamp when notifications were enabled — used to skip the first 100 ms
+   warm-up period so the BLE stack has time to negotiate MTU before we flood it. */
+static uint32_t notify_enabled_time = 0;
 
 /* Пакет данных шара */
 #pragma pack(push, 1)
@@ -58,7 +60,8 @@ static struct bt_conn *cur_conn = NULL;
 static bool ble_connected = false;
 static bool notify_enabled = false;
 static uint8_t battery_level   = 100;
-static uint32_t data_interval_ms = 100;
+/* 10 ms = 100 Hz — must match dt=0.01f hard-coded in mahony_update() */
+static uint32_t data_interval_ms = 10;
 static uint32_t sample_count;
 
 /* IMU / Mahony */
@@ -68,11 +71,17 @@ static float gyro_bias[3]  = {0};
 
 /* I2C / LSM6DS3 */
 static const struct device *i2c_dev;
+/* Actual I2C address found during check_imu() — can be 0x6A or 0x6B */
+static uint8_t lsm6ds3_found_addr = LSM6DS3_ADDR;
 #define LSM6DS3_ADDR      0x6B
 #define LSM6DS3_WHO_AM_I  0x0F
 #define LSM6DS3_CTRL1_XL  0x10
 #define LSM6DS3_CTRL2_G   0x11
 #define LSM6DS3_OUTX_L_XL 0x28
+
+#define Kp 2.0f   // Доверие акселерометру
+#define Ki 0.005f // Компенсация дрейфа гироскопа
+static float eInt[3] = {0.0f, 0.0f, 0.0f};
 
 /* Прототипы */
 static void calibrate_imu(int num_samples);
@@ -250,6 +259,8 @@ static int check_imu(void)
             int r1 = i2c_write_reg(i2c_dev, a, LSM6DS3_CTRL1_XL, 0x6A);
             int r2 = i2c_write_reg(i2c_dev, a, LSM6DS3_CTRL2_G,  0x6A);
             printk("IMU configured at 0x%02X (writes %d,%d)\n", a, r1, r2);
+            /* Save actual address for use in read_imu_data() */
+            lsm6ds3_found_addr = a;
             return 0;
         }
     }
@@ -263,14 +274,14 @@ static void calibrate_imu(int num_samples)
 {
     float accel_sum[3] = {0};
     float gyro_sum[3]  = {0};
+    int valid = 0;
 
-    printk("Calibrating IMU, keep still...\n");
+    printk("Calibrating IMU (%d samples), keep still...\n", num_samples);
 
     for (int i = 0; i < num_samples; i++) {
         uint8_t buf[12];
-        if (i2c_read_multi(i2c_dev, LSM6DS3_ADDR,
+        if (i2c_read_multi(i2c_dev, lsm6ds3_found_addr,
                            LSM6DS3_OUTX_L_XL, buf, 12) == 0) {
-
             int16_t ax = (int16_t)((buf[1] << 8) | buf[0]);
             int16_t ay = (int16_t)((buf[3] << 8) | buf[2]);
             int16_t az = (int16_t)((buf[5] << 8) | buf[4]);
@@ -284,26 +295,38 @@ static void calibrate_imu(int num_samples)
             gyro_sum[0]  += gx;
             gyro_sum[1]  += gy;
             gyro_sum[2]  += gz;
+            valid++;
         }
         k_msleep(10);
     }
 
-    accel_bias[0] = accel_sum[0] / num_samples;
-    accel_bias[1] = accel_sum[1] / num_samples;
-    accel_bias[2] = (accel_sum[2] / num_samples) - 8192.0f; /* 1g при ±4g */
+    if (valid == 0) {
+        printk("Calibration FAILED: no valid I2C reads. Biases unchanged.\n");
+        return;
+    }
 
-    gyro_bias[0] = gyro_sum[0] / num_samples;
-    gyro_bias[1] = gyro_sum[1] / num_samples;
-    gyro_bias[2] = gyro_sum[2] / num_samples;
+    accel_bias[0] = accel_sum[0] / valid;
+    accel_bias[1] = accel_sum[1] / valid;
+    accel_bias[2] = (accel_sum[2] / valid) - 8192.0f; /* subtract 1g at ±4g scale */
 
-    printk("Calibration done\n");
+    gyro_bias[0] = gyro_sum[0] / valid;
+    gyro_bias[1] = gyro_sum[1] / valid;
+    gyro_bias[2] = gyro_sum[2] / valid;
+
+    printk("Calibration done (%d/%d valid). accel_bias=%.0f,%.0f,%.0f\n",
+           valid, num_samples,
+           (double)accel_bias[0], (double)accel_bias[1], (double)accel_bias[2]);
+
+    /* Reset Mahony filter state to prevent startup spike */
+    q[0] = 1.0f; q[1] = 0.0f; q[2] = 0.0f; q[3] = 0.0f;
+    eInt[0] = 0.0f; eInt[1] = 0.0f; eInt[2] = 0.0f;
 }
 
 static int read_imu_data(struct sensor_data *data)
 {
     uint8_t buf[12];
 
-    if (i2c_read_multi(i2c_dev, LSM6DS3_ADDR,
+    if (i2c_read_multi(i2c_dev, lsm6ds3_found_addr,
                        LSM6DS3_OUTX_L_XL, buf, 12) < 0)
         return -1;
 
@@ -322,39 +345,26 @@ static int read_imu_data(struct sensor_data *data)
     data->gyro_y  = (int16_t)gy;
     data->gyro_z  = (int16_t)gz;
 
-    /* Для Mahony будем использовать уже здесь в float */
-    float ax_g = ax * 0.000122f;                      /* по твоим коэффициентам */
+    /* Перевод в g и rad/s для фильтра */
+    float ax_g = ax * 0.000122f;                      
     float ay_g = ay * 0.000122f;
     float az_g = az * 0.000122f;
-    float gx_r = gx * 0.0175f * (M_PI / 180.0f);      /* 500 dps → rad/s */
+    float gx_r = gx * 0.0175f * (M_PI / 180.0f);      
     float gy_r = gy * 0.0175f * (M_PI / 180.0f);
     float gz_r = gz * 0.0175f * (M_PI / 180.0f);
 
+    /* Кормим данные в фильтр. 
+       ВАЖНО: мы передаем ax_g, а не ax_n, так как фильтр сам сделает нормализацию! */
     mahony_update(ax_g, ay_g, az_g, gx_r, gy_r, gz_r);
 
-    /* --- НОВОЕ: грубые углы наклона из акселерометра --- */
-    float ax_n = ax_g;
-    float ay_n = ay_g;
-    float az_n = az_g;
+    /* Достаем чистые, отфильтрованные углы (ZYX) */
+    float roll, pitch, yaw;
+    quat_to_euler_zyx(q, &roll, &pitch, &yaw);
 
-    /* нормируем на 1g для устойчивости */
-    float norm = sqrtf(ax_n * ax_n + ay_n * ay_n + az_n * az_n);
-    if (norm > 1e-6f) {
-        ax_n /= norm;
-        ay_n /= norm;
-        az_n /= norm;
-    }
-
-    /* roll вокруг X, pitch вокруг Y, yaw пока 0.
-       Предполагаем: Z вверх, X вправо, Y вперёд. */
-    float roll  = atan2f(ay_n, az_n);
-    float pitch = -atan2f(ax_n, sqrtf(ay_n * ay_n + az_n * az_n));
-    float yaw   = 0.0f;
-
-    data->roll  = (int16_t)lrintf(roll  * 1000.0f);  /* 1e-3 рад */
+    /* Запаковываем для отправки (в тысячных долях радиана или градуса) */
+    data->roll  = (int16_t)lrintf(roll  * 1000.0f);  
     data->pitch = (int16_t)lrintf(pitch * 1000.0f);
     data->yaw   = (int16_t)lrintf(yaw   * 1000.0f);
-    /* --- КОНЕЦ НОВОГО --- */
 
     return 0;
 }
@@ -363,27 +373,48 @@ static int read_imu_data(struct sensor_data *data)
 static void mahony_update(float ax, float ay, float az,
                           float gx, float gy, float gz)
 {
-    /* Только интеграция gyro, без feedback для простоты */
-    float dt = 0.01f;
+    float norm;
+    float vx, vy, vz;
+    float ex, ey, ez;
+    float dt = 0.01f; // 10ms (100 Гц)
 
+    // Нормализация вектора акселерометра
+    norm = sqrtf(ax*ax + ay*ay + az*az);
+    if (norm == 0.0f) return;
+    ax /= norm; ay /= norm; az /= norm;
+
+    // Оценка направления гравитации по текущему кватерниону
+    vx = 2.0f * (q[1]*q[3] - q[0]*q[2]);
+    vy = 2.0f * (q[0]*q[1] + q[2]*q[3]);
+    vz = q[0]*q[0] - q[1]*q[1] - q[2]*q[2] + q[3]*q[3];
+
+    // Векторное произведение (ошибка)
+    ex = (ay*vz - az*vy);
+    ey = (az*vx - ax*vz);
+    ez = (ax*vy - ay*vx);
+
+    // Интегральная ошибка
+    eInt[0] += ex * Ki * dt;
+    eInt[1] += ey * Ki * dt;
+    eInt[2] += ez * Ki * dt;
+
+    // Коррекция гироскопа
+    gx += Kp * ex + eInt[0];
+    gy += Kp * ey + eInt[1];
+    gz += Kp * ez + eInt[2];
+
+    // Интеграция скорости изменения кватерниона
     float dq0 = 0.5f * (-q[1]*gx - q[2]*gy - q[3]*gz);
     float dq1 = 0.5f * ( q[0]*gx + q[2]*gz - q[3]*gy);
     float dq2 = 0.5f * ( q[0]*gy - q[1]*gz + q[3]*gx);
     float dq3 = 0.5f * ( q[0]*gz + q[1]*gy - q[2]*gx);
 
-    q[0] += dq0 * dt;
-    q[1] += dq1 * dt;
-    q[2] += dq2 * dt;
-    q[3] += dq3 * dt;
+    q[0] += dq0 * dt; q[1] += dq1 * dt;
+    q[2] += dq2 * dt; q[3] += dq3 * dt;
 
-    float norm = sqrtf(q[0]*q[0] + q[1]*q[1] +
-                       q[2]*q[2] + q[3]*q[3]);
-    if (norm > 0.0f) {
-        q[0] /= norm;
-        q[1] /= norm;
-        q[2] /= norm;
-        q[3] /= norm;
-    }
+    // Нормализация кватерниона
+    norm = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+    q[0] /= norm; q[1] /= norm; q[2] /= norm; q[3] /= norm;
 }
 /* q = [w, x, y, z], выдаём углы в радианах (ZYX: yaw-pitch-roll) */
 static void quat_to_euler_zyx(const float q[4],
@@ -420,14 +451,14 @@ int main(void)
 
     /* IMU init */
     i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
-if (device_is_ready(i2c_dev) && (check_imu() == 0)) {
-    current_data.status |= 0x01;
-    calibrate_imu(200);
-    printk("IMU OK\n");
-} else {
-    current_data.status &= ~0x01;
-    printk("IMU not detected, using simulated data\n");
-}
+    if (device_is_ready(i2c_dev) && (check_imu() == 0)) {
+        current_data.status |= 0x01;
+        calibrate_imu(200);
+        printk("IMU OK (addr=0x%02X)\n", lsm6ds3_found_addr);
+    } else {
+        current_data.status &= ~0x01;
+        printk("IMU not detected, using simulated data\n");
+    }
 
     /* BLE init */
     int err = bt_enable(NULL);
@@ -445,13 +476,7 @@ if (device_is_ready(i2c_dev) && (check_imu() == 0)) {
     .peer = NULL,
     };
 
-        err = bt_le_adv_start(&adv_param, ad, ARRAY_SIZE(ad),
-                      NULL, 0);
-    if (err) {
-    printk("Advertising failed: %d\n", err);
-    return 0;
-    }
-    printk("Advertising as MagBall\n");
+    err = bt_le_adv_start(&adv_param, ad, ARRAY_SIZE(ad), NULL, 0);
     if (err) {
         printk("Advertising failed: %d\n", err);
         return 0;
@@ -483,11 +508,26 @@ if (device_is_ready(i2c_dev) && (check_imu() == 0)) {
 
         current_data.sequence = sample_count++;
         current_data.battery  = battery_level;
-        printk("BALL seq=%lu roll=%d pitch=%d yaw=%d\n",
-       (unsigned long)sample_count,
-       current_data.roll,
-       current_data.pitch,
-       current_data.yaw);
+        
+        /* Send BLE notification. Skip first 100 ms after subscription to give
+           the stack time to negotiate MTU before we start flooding packets. */
+        if (ble_connected && notify_enabled &&
+            (k_uptime_get_32() - notify_enabled_time > 100U)) {
+            int ret = bt_gatt_notify(cur_conn, &magball_service.attrs[2],
+                                     &current_data, sizeof(current_data));
+            if (ret && ret != -EAGAIN) {
+                /* -EAGAIN = TX queue full — normal at 100 Hz, skip silently */
+                printk("Notify error: %d\n", ret);
+            }
+        }
+        /* Log every 100 packets to avoid UART spam at 100 Hz */
+        if (sample_count % 100 == 0) {
+            printk("BALL seq=%lu roll=%d pitch=%d yaw=%d\n",
+                   (unsigned long)sample_count,
+                   current_data.roll,
+                   current_data.pitch,
+                   current_data.yaw);
+        }
 
         k_msleep(10);
     }

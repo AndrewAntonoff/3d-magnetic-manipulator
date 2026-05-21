@@ -26,6 +26,12 @@ If no LICENSE file comes with this software, it is provided AS-IS.
 #include "sensor_mlx90393.h"
 #include "qspi_flash.h"
 #include "coil_calib.h"
+#include "vl53l5x_interface.h"
+#include "i2c.h"
+
+#define BINARY_CMD "b_all"
+#define SENSOR_FLOATS 15
+#define COIL_FLOATS 12
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -45,6 +51,16 @@ static uint8_t binary_rx_mode = 0;
 static uint8_t binary_rx_buffer[sizeof(CoilCalibData_t)];
 static uint32_t binary_rx_index = 0;
 static uint32_t binary_rx_total = 0;
+
+static uint8_t coil_rx_mode = 0;                // флаг приёма данных катушек
+static uint8_t coil_rx_buffer[48];               // буфер для 12 float (48 байт)
+static uint32_t coil_rx_index = 0;                // текущий индекс в буфере
+static uint32_t coil_rx_total = 48;                // ожидаемое количество байт
+static uint32_t coil_rx_last_byte = 0;             // время последнего принятого байта
+// static uint32_t coil_rx_start = 0;                  // время начала режима
+static uint8_t echo_enabled = 1;   // разрешить эхо команд
+volatile uint8_t training_mode = 0;   // 0 – обычный режим, 1 – режим обучения
+
 
 static ImuRxState_t imu_rx_state = WAIT_FOR_AA;
 static uint8_t imu_temp_buf[IMU_PACKET_SIZE];
@@ -75,8 +91,36 @@ uint8_t new_command = 0;
 uint8_t streaming_active = 0;
 uint32_t stream_interval_ms = 50;
 
-// Глобальная переменная для отчета HID
-HID_JoystickReport_TypeDef Joystick_Report = {0};
+static volatile uint8_t binary_mode = 0;
+
+
+// Глобальные переменные отчета HID (Dual-Mode)
+// --- USB Dual-Mode Variables ---
+__ALIGN_BEGIN static uint8_t Joystick_ReportDesc[65] __ALIGN_END = {
+    0x05, 0x01, 0x09, 0x04, 0xA1, 0x01, 0x85, 0x01,
+    0x09, 0x30, 0x09, 0x31, 0x09, 0x32, 0x09, 0x33,
+    0x09, 0x34, 0x09, 0x35, 0x16, 0x01, 0x80, 0x26,
+    0xFF, 0x7F, 0x75, 0x10, 0x95, 0x06, 0x81, 0x02,
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x20, 0x15, 0x00,
+    0x25, 0x01, 0x75, 0x01, 0x95, 0x20, 0x81, 0x02,
+    /* Feature Report 32-bytes ID 0x10 */
+    0x85, 0x10, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x20, 0xB1, 0x02,
+    0xC0
+};
+
+__ALIGN_BEGIN static uint8_t SpaceMouse_ReportDesc[98] __ALIGN_END = {
+    0x05, 0x01, 0x09, 0x08, 0xA1, 0x01, 
+    0x85, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x32, 0x16, 0x00, 0x80, 0x26, 0xFF, 0x7F, 0x36, 0x00, 0x80, 0x46, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x03, 0x81, 0x02,
+    0x85, 0x02, 0x09, 0x33, 0x09, 0x34, 0x09, 0x35, 0x16, 0x00, 0x80, 0x26, 0xFF, 0x7F, 0x36, 0x00, 0x80, 0x46, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x03, 0x81, 0x02,
+    0x85, 0x03, 0x05, 0x09, 0x19, 0x01, 0x29, 0x02, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x02, 0x81, 0x02, 0x95, 0x01, 0x75, 0x06, 0x81, 0x03,
+    /* Feature Report 32-bytes ID 0x10 */
+    0x85, 0x10, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x20, 0xB1, 0x02,
+    0xC0
+};
+
+uint8_t *Active_HID_ReportDesc = SpaceMouse_ReportDesc; 
+uint16_t Active_HID_ReportDescSize = sizeof(SpaceMouse_ReportDesc);
+uint8_t current_usb_mode = 1; // 1 = SpaceMouse, 0 = Joystick
 
 /* USER CODE END PTD */
 
@@ -118,7 +162,7 @@ extern MLX90393_t sensors[NUM_SENSORS];
 void SystemClock_Config(void);
 static void MPU_Config(void);
 /* USER CODE BEGIN PFP */
-
+void Switch_USB_Mode(uint8_t mode);
 // Прототипы внутренних функций
 void System_Init(void);
 void Process_Console_Commands(void);
@@ -139,7 +183,7 @@ uint8_t Quick_Read_Sensor(uint8_t sensor_idx);
 uint8_t Read_Sensor(uint8_t sensor_idx);
 void Calibrate_Sensors_Start(void);
 void Get_Sensor_Stats_String(char *buffer, uint16_t buffer_size);
-void Receive_Coil_Calibration(void);
+/* Receive_Coil_Calibration() removed — dead code, binary rx handled via binary_rx_mode flag */
 void Process_Coil_Calib_Data(uint8_t *buffer, uint32_t len);
 uint8_t Test_Sensor_Connection(uint8_t sensor_idx);
 void Check_QSPI(void);
@@ -164,7 +208,7 @@ void System_Init(void) {
     Load_Coil_Calibration();
 
     // Проверка калибровки катушек
-    float test_field[5][3];
+    float test_field[8][3];
     Get_Coil_Field(0, 0.0f, test_field);
     Debug_Print(LOG_LEVEL_INFO, "Coil 0 at I=0: sensor0 field = %.1f, %.1f, %.1f µT\r\n",
                 test_field[0][0], test_field[0][1], test_field[0][2]);
@@ -188,6 +232,7 @@ void System_Init(void) {
     Load_Calibration_From_Flash();
 
     Debug_Print(LOG_LEVEL_INFO, "System initialization complete.\r\n");
+    VL53L5X_Init();
 }
 
 // Обработка байта IMU
@@ -299,9 +344,10 @@ void Stream_Sensor_Data(void) {
 
     for (int i = 0; i < ACTIVE_SENSORS; i++) {
         if (sensors[i].is_connected) {
-            float x = sensors[i].magnetic_field[0] + sensors[i].offset[0];
-            float y = sensors[i].magnetic_field[1] + sensors[i].offset[1];
-            float z = sensors[i].magnetic_field[2] + sensors[i].offset[2];
+            // Apply full calibration (offset + scale) for streamed data
+            float x = (sensors[i].magnetic_field[0] + sensors[i].offset[0]) * sensors[i].scale[0];
+            float y = (sensors[i].magnetic_field[1] + sensors[i].offset[1]) * sensors[i].scale[1];
+            float z = (sensors[i].magnetic_field[2] + sensors[i].offset[2]) * sensors[i].scale[2];
             len += snprintf(buffer + len, sizeof(buffer) - len, ",%.1f,%.1f,%.1f", x, y, z);
         } else {
             len += snprintf(buffer + len, sizeof(buffer) - len, ",0,0,0");
@@ -355,70 +401,181 @@ void Process_Coil_Calib_Data(uint8_t *buffer, uint32_t len) {
     HAL_UART_Transmit(&huart2, (uint8_t*)"OK\r\n", 4, 100);
 }
 
-void Receive_Coil_Calibration(void) {
-    uint8_t buffer[sizeof(CoilCalibData_t)];
-    Debug_Print(LOG_LEVEL_INFO, "Ready to receive %d bytes...\r\n", sizeof(buffer));
+/* Receive_Coil_Calibration() removed — was dead code (never called).
+   Binary reception is handled via the binary_rx_mode flag in HAL_UART_RxCpltCallback.
+   Use the 'flash_coil' console command to trigger calibration upload. */
 
-    HAL_Delay(100);
-    __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_PEF | UART_CLEAR_FEF);
+#include "usbd_hid.h"
+#include "usbd_desc.h"
+extern USBD_HandleTypeDef hUsbDeviceFS;
+extern uint8_t USBD_FS_DeviceDesc[];
 
-    HAL_StatusTypeDef status = HAL_UART_Receive(&huart2, buffer, sizeof(buffer), 10000);
-    if (status != HAL_OK) {
-        Debug_Print(LOG_LEVEL_ERROR, "UART receive error: %d\r\n", status);
-        return;
-    }
+static int16_t hid_axes[6] = {0};
+float sensitivity_scales[6] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 
-    CoilCalibHeader_t *hdr = (CoilCalibHeader_t*)buffer;
-    if (hdr->signature != COIL_CALIB_SIGNATURE) {
-        Debug_Print(LOG_LEVEL_ERROR, "Invalid signature: expected 0x%08X, got 0x%08X\r\n",
-                    COIL_CALIB_SIGNATURE, hdr->signature);
-        return;
-    }
-    if (hdr->version != COIL_CALIB_VERSION) {
-        Debug_Print(LOG_LEVEL_ERROR, "Invalid version: expected %d, got %d\r\n",
-                    COIL_CALIB_VERSION, hdr->version);
-        return;
-    }
-    if (hdr->num_coils != COIL_CALIB_NUM_COILS ||
-        hdr->num_sensors != COIL_CALIB_NUM_SENSORS ||
-        hdr->num_points != COIL_CALIB_NUM_POINTS) {
-        Debug_Print(LOG_LEVEL_ERROR, "Size mismatch\r\n");
-        return;
-    }
-
-    for (uint32_t addr = COIL_CALIB_FLASH_ADDR; addr < COIL_CALIB_FLASH_ADDR + sizeof(CoilCalibData_t); addr += 4096) {
-        QSPI_Flash_EraseSector(addr);
-    }
-    QSPI_Flash_WriteBuffer(COIL_CALIB_FLASH_ADDR, buffer, sizeof(CoilCalibData_t));
-    Debug_Print(LOG_LEVEL_INFO, "Coil calibration saved to QSPI at 0x%06lX\r\n", COIL_CALIB_FLASH_ADDR);
-}
-
-void Calculate_3D_Position(void) {
-    Joystick_Report.x = 0;
-    Joystick_Report.y = 0;
-    Joystick_Report.z = 0;
-    Joystick_Report.rx = 0;
-    Joystick_Report.ry = 0;
-    Joystick_Report.rz = 0;
-    Joystick_Report.buttons = 0;
-}
-
-void Send_HID_Report(void) {
-    // Заглушка
-}
-
-// Новая функция управления левитацией
-void SystemControlLoop(void) {
-    if (control_tick) {
-        control_tick = 0;
-        if (system_state.levitation_active) {
-            float orientation[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // временно без IMU
-            EstimateBallPosition(system_state.ball_position, orientation);
-            Apply_Levitation_Control();
+void Process_Feature_Report(uint8_t *data) {
+    if (!data) return;
+    
+    // Windows hidapi sends Report ID as the first byte of payload
+    if (data[0] == 0x10) {
+        uint8_t cmd = data[1];
+        if (cmd == 0x01) { // Switch USB Mode
+            uint8_t mode = data[2];
+            Switch_USB_Mode(mode);
+        }
+        else if (cmd == 0x02) { // Set Sensitivity
+            memcpy(sensitivity_scales, &data[2], 24); // 6 floats = 24 bytes
+        }
+        else if (cmd == 0x03) { // Trigger Calibration
+            for (int i = 0; i < ACTIVE_SENSORS; i++) {
+                if (sensors[i].is_connected) {
+                    Calibrate_Offset_Procedure(i);
+                }
+            }
+        }
+        else if (cmd == 0x04) { // Save Calibration
+            Save_Calibration_To_Flash();
         }
     }
 }
 
+void Calculate_3D_Position(void) {
+    // Map ball position mm to generic joystick range (-30000 to +30000 approx for +/- 50mm)
+    hid_axes[0] = (int16_t)(system_state.ball_position[0] * 600.0f * sensitivity_scales[0]);
+    hid_axes[1] = (int16_t)(system_state.ball_position[1] * 600.0f * sensitivity_scales[1]);
+    hid_axes[2] = (int16_t)(system_state.ball_position[2] * 600.0f * sensitivity_scales[2]);
+    
+    // Map IMU orientation rad*1000 into joystick rotation axes
+    hid_axes[3] = (int16_t)(last_imu_data.pitch * 10 * sensitivity_scales[3]);
+    hid_axes[4] = (int16_t)(last_imu_data.yaw * 10 * sensitivity_scales[4]);
+    hid_axes[5] = (int16_t)(last_imu_data.roll * 10 * sensitivity_scales[5]);
+}
+
+void Send_HID_Report(void) {
+    if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED) return;
+
+    if (current_usb_mode == 0) {
+        // Joystick Mode: Send all 6 axes securely
+        uint8_t jbuf[17] = {0};
+        jbuf[0] = 1; // Report ID
+        memcpy(&jbuf[1], hid_axes, 12);
+        USBD_HID_SendReport(&hUsbDeviceFS, jbuf, 17);
+    } else {
+        // SpaceMouse Mode: Send separate translation or rotation alternating frames
+        static uint8_t toggle = 0;
+        uint8_t sbuf[7];
+        if (toggle == 0) {
+            sbuf[0] = 1; // Translation ID
+            memcpy(&sbuf[1], &hid_axes[0], 6);
+            toggle = 1;
+        } else {
+            sbuf[0] = 2; // Rotation ID
+            memcpy(&sbuf[1], &hid_axes[3], 6);
+            toggle = 0;
+        }
+        USBD_HID_SendReport(&hUsbDeviceFS, sbuf, 7);
+    }
+}
+
+void Switch_USB_Mode(uint8_t mode) {
+    if (current_usb_mode == mode) return;
+    current_usb_mode = mode;
+    
+    USBD_Stop(&hUsbDeviceFS);
+    USBD_DeInit(&hUsbDeviceFS);
+    HAL_Delay(500); // Trigger host disconnect detection
+    
+    if (mode == 0) {
+        // Generic Joystick STMicro
+        USBD_FS_DeviceDesc[8]  = LOBYTE(1155); 
+        USBD_FS_DeviceDesc[9]  = HIBYTE(1155);
+        USBD_FS_DeviceDesc[10] = LOBYTE(22315);
+        USBD_FS_DeviceDesc[11] = HIBYTE(22315);
+        Active_HID_ReportDesc = Joystick_ReportDesc;
+        Active_HID_ReportDescSize = sizeof(Joystick_ReportDesc);
+    } else {
+        // SpaceNavigator 3Dconnexion
+        USBD_FS_DeviceDesc[8]  = 0x6F; 
+        USBD_FS_DeviceDesc[9]  = 0x25;
+        USBD_FS_DeviceDesc[10] = 0x26;
+        USBD_FS_DeviceDesc[11] = 0xC6;
+        Active_HID_ReportDesc = SpaceMouse_ReportDesc;
+        Active_HID_ReportDescSize = sizeof(SpaceMouse_ReportDesc);
+    }
+    
+    USBD_Init(&hUsbDeviceFS, &FS_Desc, DEVICE_FS);
+    USBD_RegisterClass(&hUsbDeviceFS, &USBD_HID);
+    USBD_Start(&hUsbDeviceFS);
+}
+
+// Новая функция управления левитацией
+void SystemControlLoop(void)
+{
+    if (!training_mode) return;
+
+    static uint32_t last_packet_time = 0;
+    static uint8_t init_done = 0; // Флаг одиночной инициализации
+
+    // Выполняется ТОЛЬКО ОДИН РАЗ при старте режима левитации/обучения
+    if (!init_done) {
+        HAL_UART_AbortReceive(&huart2); // Жестко выключаем прерывания от консоли
+        __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_PEF | UART_CLEAR_FEF);
+        init_done = 1;
+        last_packet_time = HAL_GetTick();
+    }
+
+    // 1. ПЕРЕДАЧА ДАННЫХ В PYTHON
+    float sensor_buffer[15];
+    for (int i = 0; i < 5; i++) {
+        sensor_buffer[i*3]   = sensors[i].magnetic_field[0];
+        sensor_buffer[i*3+1] = sensors[i].magnetic_field[1];
+        sensor_buffer[i*3+2] = sensors[i].magnetic_field[2];
+    }
+    uint32_t tx_marker = 0xDEADBEEF;
+    HAL_UART_Transmit(&huart2, (uint8_t*)&tx_marker, 4, 10);
+    HAL_UART_Transmit(&huart2, (uint8_t*)sensor_buffer, 60, 20);
+
+    // 2. ПРИЕМ ДАННЫХ ОТ PYTHON
+    // Снимаем только флаг переполнения, если он возник из-за наводок
+    if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_ORE)) {
+        __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_OREF);
+    }
+
+    uint32_t rx_marker = 0;
+    // Buffer holds COIL_FLOATS (12) floats for protocol compatibility with Python,
+    // but only NUM_COILS (8) are applied. Extra values are silently ignored.
+    float coil_buffer[COIL_FLOATS] = {0.0f};
+
+    if (HAL_UART_Receive(&huart2, (uint8_t*)&rx_marker, 4, 10) == HAL_OK) {
+        if (rx_marker == 0xDEADBEEF) {
+            // Маркер совпал, забираем токи
+            if (HAL_UART_Receive(&huart2, (uint8_t*)coil_buffer, COIL_FLOATS * sizeof(float), 15) == HAL_OK) {
+                last_packet_time = HAL_GetTick(); // Успех! Сбрасываем таймер
+                for (int i = 0; i < NUM_COILS; i++) {
+                    Set_Coil_Power(i, coil_buffer[i]);
+                }
+            }
+        } else {
+            // Вычищаем мусор из буфера, если пришел не маркер
+            uint8_t dummy;
+            while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+                HAL_UART_Receive(&huart2, &dummy, 1, 1);
+            }
+        }
+    }
+
+    // 3. ЗАЩИТА ОТ ПОТЕРИ СВЯЗИ
+    if (HAL_GetTick() - last_packet_time > 1000) {
+        training_mode = 0;
+        init_done = 0; // Сбрасываем флаг для следующего запуска
+        Stop_All_Coils();
+
+        __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_OREF);
+        HAL_UART_Receive_IT(&huart2, &RxChar, 1); // Возвращаем текстовую консоль
+
+        Debug_Print(LOG_LEVEL_ERROR, "Link timeout. Coils OFF.\n");
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -455,6 +612,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
+  MX_I2C1_Init();
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   MX_QUADSPI_Init();
@@ -466,11 +624,9 @@ int main(void)
 
   System_Init();
   HAL_Delay(500); // дать время всей периферии стабилизироваться
-  for (int i = 0; i < 5; i++) {
-      Sensors_Update(); // принудительно "прогнать" автомат
-      HAL_Delay(10);
-  }
+
   HAL_UART_Receive_IT(&huart2, &RxChar, 1);
+  __HAL_UART_ENABLE_IT(&huart3, UART_IT_RXNE); // Включаем прерывание для приема IMU-байт по UART3
 
   // Запуск ШИМ для всех катушек
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
@@ -518,7 +674,22 @@ int main(void)
   {
     /* USER CODE BEGIN 3 */
       // Управление левитацией (вынесено в отдельную функцию)
-      SystemControlLoop();
+      if (control_tick)
+      {
+          if (training_mode) {
+              SystemControlLoop();
+          } else if (system_state.levitation_active) {
+              Apply_Levitation_Control();
+          }
+          control_tick = 0;
+      }
+
+      // Проверка таймаута приёма данных катушек
+      if (coil_rx_mode && (HAL_GetTick() - coil_rx_last_byte > 200)) {
+          coil_rx_mode = 0;
+          coil_rx_index = 0;
+          Debug_Print(LOG_LEVEL_WARNING, "Coil RX timeout, mode reset\r\n");
+      }
 
       // Обработка команд консоли
       Process_Console_Commands();
@@ -533,7 +704,8 @@ int main(void)
       Process_Coil_Test();
 
       // Обновление датчиков через DMA
-      Sensors_Update();
+     // Sensors_Update();
+      VL53L5X_Process();
 
       // Обработка данных IMU
       if (imu_packet_ready)
@@ -549,6 +721,14 @@ int main(void)
                           last_imu_data.pitch,
                           last_imu_data.yaw);
           }
+      }
+
+      // HID Joystick 100Hz Transmitter
+      static uint32_t last_hid_time = 0;
+      if (HAL_GetTick() - last_hid_time >= 10) {
+          last_hid_time = HAL_GetTick();
+          Calculate_3D_Position();
+          Send_HID_Report();
       }
   }
   /* USER CODE END 3 */
@@ -600,6 +780,12 @@ void SystemClock_Config(void)
 // Обработчик завершения приёма UART
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART2) {
+    	if (training_mode) {
+    	            // В режиме обучения не обрабатываем команды, просто возобновляем приём
+    	            HAL_UART_Receive_IT(&huart2, &RxChar, 1);
+    	            return;
+    	        }
+        // Режим приёма калибровки катушек (flash_coil)
         if (binary_rx_mode) {
             if (binary_rx_index < binary_rx_total) {
                 binary_rx_buffer[binary_rx_index++] = RxChar;
@@ -608,22 +794,48 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
                 binary_rx_mode = 0;
                 Process_Coil_Calib_Data(binary_rx_buffer, binary_rx_total);
             }
-        } else {
+        }
+        // Режим приёма токов катушек после команды b_all
+        else if (coil_rx_mode) {
+            if (coil_rx_index < coil_rx_total) {
+                coil_rx_buffer[coil_rx_index++] = RxChar;
+                coil_rx_last_byte = HAL_GetTick();  // запомнили время
+            }
+            if (coil_rx_index >= coil_rx_total) {
+                coil_rx_mode = 0;
+                float *coil_powers = (float*)coil_rx_buffer;
+                // Apply only NUM_COILS values; extra Python-side values are ignored
+                for (int i = 0; i < NUM_COILS; i++) {
+                    Set_Coil_Power(i, coil_powers[i]);
+                }
+            }
+        }
+        // Обычный командный режим (накопление команды)
+        else {
+            // Обработка символов командной строки
             if (RxChar == '\r' || RxChar == '\n') {
                 if (command_index > 0) {
                     new_command = 1;
                 }
-                HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n", 2, 10);
+                if (echo_enabled) {
+                    HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n", 2, 10);
+                }
             } else if (RxChar == '\b' || RxChar == 127) {
                 if (command_index > 0) {
                     command_index--;
-                    HAL_UART_Transmit(&huart2, (uint8_t*)"\b \b", 3, 10);
+                    if (echo_enabled) {
+                        HAL_UART_Transmit(&huart2, (uint8_t*)"\b \b", 3, 10);
+                    }
                 }
             } else if (command_index < sizeof(command_buffer) - 1) {
                 command_buffer[command_index++] = RxChar;
-                HAL_UART_Transmit(&huart2, &RxChar, 1, 10);
+                if (echo_enabled) {
+                    HAL_UART_Transmit(&huart2, &RxChar, 1, 10);
+                }
             }
         }
+
+        // Возобновляем приём следующего байта
         HAL_UART_Receive_IT(&huart2, &RxChar, 1);
     }
 }
@@ -638,7 +850,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
 // Обработчик периодического таймера
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
     if (htim->Instance == TIM6) {
-        control_tick = 1;
+        Sensors_Tick();      // обновление датчиков
+        control_tick = 1;    // флаг для левитации
     }
 }
 
@@ -897,11 +1110,73 @@ void Process_Console_Commands(void) {
             Debug_Print(LOG_LEVEL_ERROR, "Usage: set_target x y z\r\n");
         }
     }
-    else {
-        Debug_Print(LOG_LEVEL_ERROR, "Unknown command: '%s'\r\n", cmd);
-        Debug_Print(LOG_LEVEL_INFO, "Try 'help' for available commands\r\n");
-    }
+    else if (strcmp(cmd, "b_all") == 0) {
+        echo_enabled = 0;
+        while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC) == RESET) {}
 
+        uint32_t sync_marker = 0xDEADBEEF;
+        HAL_UART_Transmit(&huart2, (uint8_t*)&sync_marker, 4, 100);
+
+        float sensor_buffer[15];
+            for (int i = 0; i < 5; i++) {
+                sensor_buffer[i*3]   = sensors[i].magnetic_field[0];
+                sensor_buffer[i*3+1] = sensors[i].magnetic_field[1];
+                sensor_buffer[i*3+2] = sensors[i].magnetic_field[2];
+            }
+        HAL_UART_Transmit(&huart2, (uint8_t*)sensor_buffer, sizeof(sensor_buffer), 100);
+
+        HAL_NVIC_DisableIRQ(USART2_IRQn);
+        float coil_buffer[12];
+        HAL_StatusTypeDef status = HAL_UART_Receive(&huart2, (uint8_t*)coil_buffer, sizeof(coil_buffer), 500);
+        HAL_NVIC_EnableIRQ(USART2_IRQn);
+
+        if (status == HAL_OK) {
+            // Apply only NUM_COILS values; protocol may carry 12 for Python compatibility
+            for (int i = 0; i < NUM_COILS; i++) {
+                Set_Coil_Power(i, coil_buffer[i]);
+            }
+            // Отправляем синхрометку перед эхом (little-endian: 0xCAFEBABE -> BE BA FE CA)
+            while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC) == RESET) {}  // ждём завершения предыдущей отправ
+            uint32_t echo_marker = 0xCAFEBABE;
+            HAL_UART_Transmit(&huart2, (uint8_t*)&echo_marker, 4, 100);
+            // Отправляем сами токи (48 байт)
+            HAL_UART_Transmit(&huart2, (uint8_t*)coil_buffer, sizeof(coil_buffer), 100);
+        }
+
+        echo_enabled = 1;
+        command_index = 0;
+        memset(command_buffer, 0, sizeof(command_buffer));
+        Show_Prompt();
+        return;
+    }
+    else if (strcmp(cmd, "train_on") == 0) {
+            training_mode = 1;
+            echo_enabled = 0;
+            HAL_UART_AbortReceive(&huart2); // Остановить прерывания для чистого бинарного обмена
+            Stop_All_Coils();
+        }
+        else if (strcmp(cmd, "train_off") == 0) {
+            training_mode = 0;
+            echo_enabled = 1;
+            Stop_All_Coils();
+            HAL_UART_Receive_IT(&huart2, &RxChar, 1); // Вернуть прерывания для консоли
+        }
+        else if (strcmp(cmd, "usb_mode") == 0) {
+            char *arg = strtok(NULL, " ");
+            if (arg) {
+                int mode = atoi(arg);
+                Switch_USB_Mode(mode);
+                Debug_Print(LOG_LEVEL_INFO, "USB Mode switched to %s\r\n", mode == 1 ? "SpaceMouse" : "Joystick");
+            } else {
+                Debug_Print(LOG_LEVEL_ERROR, "Usage: usb_mode <0=Joystick, 1=SpaceMouse>\r\n");
+            }
+        }
+
+
+    else {
+           Debug_Print(LOG_LEVEL_ERROR, "Unknown command: '%s'\r\n", cmd);
+           Debug_Print(LOG_LEVEL_INFO, "Try 'help' for available commands\r\n");
+       }
     command_index = 0;
     memset(command_buffer, 0, sizeof(command_buffer));
     Show_Prompt();
@@ -936,6 +1211,8 @@ void MPU_Config(void)
   * @retval None
   */
 void Error_Handler(void) {
+    // Safety first: turn off all coils before halting
+    Stop_All_Coils();
     Debug_Print(LOG_LEVEL_ERROR, "Fatal error occurred! System halted.\r\n");
     while(1) {
         HAL_Delay(500);
